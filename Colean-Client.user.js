@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name            Colean Client v1.0.0 [Moomoo.io] By ItzYakudza
+// @name            Colean Client v1.0.0 | By ItzYakudza
 // @author          ItzYakudza
-// @description     Colean Client — comfortable Moomoo.io experience (based on Colean)
-// @icon            https://i.imgur.com/rlMQW2P.png
+// @description     comfortable Moomoo.io experience
+// @icon            https://static.vecteezy.com/system/resources/previews/005/283/491/non_2x/simple-sword-icon-white-color-vector.jpg
 // @version         1.0.0
 // @match           *://moomoo.io/
 // @match           *://moomoo.io/?server*
@@ -13,77 +13,6 @@
 // @license         MIT
 // @namespace       https://github.com/ItzYakudza/Colean-Client
 // ==/UserScript==
-/* jshint esversion:6 */
-
-/*
-    Author: ItzYakudza (based on Murka / Colean)
-    Github: https://github.com/ItzYakudza/Colean-client
-    Greasyfork: https://greasyfork.org/users/919633
-    Discord: https://discord.gg/cPRFdcZkeD
-
-    Version: 1.0.0
-    Build: Colean Client v1.0.0
-    Compatibility port: Colean 2.1 bundle / custom MessagePack / signed packets
-
-    Leaking source code myself.. unfortunately.
-    The reason you can read this message and use this client is quite tragic, for more info join my discord server and check annoucements channel.
-    I'll leave the source and its up to you to decide what to do with it.
-    Just make sure to put my credits, as the original author of this client.
-
-    This client is no longer under active development, so all future updates will rely entirely on community contributions.
-    If you would like to participate in the development, please fork the repository and use a better IDE instead.
-    Do not modify anything in the tampermonkey directly! You'll safe your time by a lot!
-*/
-
-// Some constants, used to prevent userscript injection without loader
-
-/*
-this is my update log of what i added after 5.5.5 version of glotus
-
-v6.0
--added auto farm for bots
--added extra bot menu
--randomill for bots (in development)
--some other stuff comes with the extra bot menu but prob gonna remove or remake some stuff so its just beta
-
-v6.1
--added manual aim option (if u hate autoaim of glotus)
--weapon selection for bots
--autohit for bots now they hit with u when u press E
--fixed some little bugs that was in the original version
--bots no longer bug when requests accepted to the clan too fast
--improved automill mode: now they use autopathfinder to find best way to spam more mills.after placed 199 mills while on randomill mode they will start following the player while doing that they will also break stuff that blocks them.(in beta btw)
--fixed some bugs and not working features in extra bot menu
--added button to close all bots instantly cuz why not
-
-v6.1.1 (another bot upgrade)
--now able to spam across all servers without entering the server
--added a key to spawn bots to all servers in 1 click (not auto yet) (in developemnt)
--added teleport to safewalk list
--added autotrap for bots to trap/spike animals depending on what bots have (trap/boost)
--added autoshoot for bots
--made autoshoot more clever, shoots only if player has no shield or covered with windmill or stuff
--seperated autoplatform autoshoot of bots. places platform only if the player covered himself with blocks that can be pass with platform
--made the bots see other bots' sight lets them to sync better (not sure tho lmao)
--made the bots see player sight also lets bots to sync enemies far away (not sure tho lmao)
--fixed player follow a feature lets ur bots to follow a player
--seperated autoplacer of bots cuz bored
--removed some stuff from extra menu
-
-v6.1.2
--added Autoshoot and AutoPlacer keybinds
--added Surround Enemy with Circle radius to cancel press again
--fixed some bugs in autoshoot
--fixed autoshoot angle search (may lag a bit if u have too many bots)
--changed the visiuals
--remade autogrind
-
-v1.0.0 Hotfix
--fixed heal issue in 200 player server
--tried to fix the hat delay problem in 200 player server by making hat changes smarter
-
-Next update will be combat upgrade
-*/
 
 Math.LN1 = 100;
 Number.DELTA = 1;
@@ -413,11 +342,12 @@ window.grbtp = 35;
             this.pending = this.requests.size > 0;
             this.cancel = this.pending ? () => {
                 for (const request of [...this.requests]) request.cancel();
+                try { if (typeof abortAllLocalTokenFetches === "function") abortAllLocalTokenFetches(); } catch (_) {}
             } : null;
         },
         beginBatch(onCancel, options = {}) {
             if (this.pending || this.session) throw new Error("A verification is already open.");
-            const session = {onCancel, concurrency:2, view:this.createPanel(true)};
+            const session = {onCancel: () => { try { if (typeof abortAllLocalTokenFetches === "function") abortAllLocalTokenFetches(); } catch (_) {} onCancel(); }, concurrency:2, view:this.createPanel(true)};
             if (options.stopLabel) session.view.cancelButton.textContent = options.stopLabel;
             session.view.target.textContent = "Two verifications can run at the same time.";
             session.view.status.textContent = "Complete each box below. Connections start after verification succeeds.";
@@ -561,40 +491,265 @@ window.grbtp = 35;
         }
     };
 
+    // Token via SAME proxy IP as game WS.
+    // Default: Theyka bridge (theyka-bridge.js → Theyka/Turnstile-Solver on :5000).
+    // Setup: SETUP-THEYKA.txt  |  node theyka-bridge.js  |  python api_solver.py --proxy True
+    const CAPTCHA_SOLVER = {
+        // "browser" / "" = Colean Turnstile UI (your IP). Stable. Bots join WITHOUT socks if proxy-token fails.
+        // "auto" = try Theyka/bridge with proxy first; on fail → browser captcha + direct WS (no proxy).
+        // "local" = only bridge/Theyka (proxy token); fail = no bot.
+        provider: "auto",
+        key: "",
+        localUrl: "http://127.0.0.1:8790/token",
+        websiteURL: "https://moomoo.io/",
+        // If browser token is used, never send bot through SOCKS (avoids CF IP mismatch kicks)
+        skipProxyOnBrowserToken: true
+    };
+
+    function parseSocksProxy(proxyUrl) {
+        const u = new URL(proxyUrl);
+        const type = (u.protocol || "").replace(":", "").toLowerCase(); // socks5 / http
+        return {
+            proxyType: type.startsWith("socks") ? "socks5" : "http",
+            proxyAddress: u.hostname,
+            proxyPort: Number(u.port) || (type.startsWith("socks") ? 1080 : 80),
+            proxyLogin: decodeURIComponent(u.username || ""),
+            proxyPassword: decodeURIComponent(u.password || "")
+        };
+    }
+
+    const localTokenAborts = new Set();
+    function abortAllLocalTokenFetches() {
+        for (const ac of [...localTokenAborts]) {
+            try { ac.abort(); } catch (_) {}
+        }
+        localTokenAborts.clear();
+    }
+
+    async function solveTurnstileWithProxy(sitekey, proxyUrl) {
+        if (!sitekey) throw new Error("Cloudflare site key missing. Refresh the page.");
+        if (!proxyUrl) throw new Error("Proxy required for proxy-bound token.");
+        const p = parseSocksProxy(proxyUrl);
+        const provider = (CAPTCHA_SOLVER.provider || "").toLowerCase();
+        const key = (CAPTCHA_SOLVER.key || "").trim();
+
+        if (provider === "local" || provider === "auto") {
+            const q = new URL(CAPTCHA_SOLVER.localUrl);
+            q.searchParams.set("sitekey", sitekey);
+            q.searchParams.set("proxy", proxyUrl);
+            q.searchParams.set("pageurl", CAPTCHA_SOLVER.websiteURL);
+            const ac = new AbortController();
+            localTokenAborts.add(ac);
+            const timer = setTimeout(() => ac.abort(), 100000);
+            const cancelWatch = setInterval(() => {
+                if (verificationCancelled(verificationRef)) ac.abort();
+            }, 300);
+            let res, data;
+            try {
+                res = await fetch(q.href, { method: "GET", signal: ac.signal });
+                data = await res.json().catch(() => ({}));
+            } catch (e) {
+                if (verificationCancelled(verificationRef) || e?.name === "AbortError") {
+                    if (verificationCancelled(verificationRef)) throw new Error("Bot connection cancelled.");
+                    throw new Error("Local token-server timeout/cancel. Check Chromium window + token-server console.");
+                }
+                throw new Error("Local token-server unreachable. Run: node token-server.js — " + (e.message || e));
+            } finally {
+                clearTimeout(timer);
+                clearInterval(cancelWatch);
+                localTokenAborts.delete(ac);
+            }
+            if (!res.ok || !data.token) {
+                throw new Error(data.error || ("Local token server failed: HTTP " + res.status));
+            }
+            return data.token;
+        }
+
+        if (provider === "auto" || provider === "local") {
+            throw new Error("Bridge/Theyka did not return a token.");
+        }
+        if (!key) {
+            throw new Error(
+                "Для capmonster/2captcha нужен CAPTCHA_SOLVER.key, либо provider \"browser\" / \"auto\"."
+            );
+        }
+
+        if (provider === "2captcha" || provider === "rucaptcha") {
+            const base = provider === "rucaptcha" ? "https://rucaptcha.com" : "https://2captcha.com";
+            const inParams = new URLSearchParams({
+                key,
+                method: "turnstile",
+                sitekey,
+                pageurl: CAPTCHA_SOLVER.websiteURL,
+                proxy: `${p.proxyLogin}:${p.proxyPassword}@${p.proxyAddress}:${p.proxyPort}`,
+                proxytype: p.proxyType.toUpperCase(),
+                json: "1"
+            });
+            const created = await fetch(base + "/in.php", { method: "POST", body: inParams }).then(r => r.json());
+            if (created.status !== 1) throw new Error("2Captcha create: " + (created.request || JSON.stringify(created)));
+            const id = created.request;
+            for (let i = 0; i < 60; i++) {
+                await new Promise(r => setTimeout(r, 5000));
+                if (verificationCancelled(verificationRef)) throw new Error("Bot connection cancelled.");
+                const polled = await fetch(`${base}/res.php?key=${encodeURIComponent(key)}&action=get&id=${encodeURIComponent(id)}&json=1`).then(r => r.json());
+                if (polled.status === 1 && polled.request) return polled.request;
+                if (polled.request !== "CAPCHA_NOT_READY") throw new Error("2Captcha result: " + (polled.request || JSON.stringify(polled)));
+            }
+            throw new Error("2Captcha timeout");
+        }
+
+        // CapMonster Cloud (default)
+        const createBody = {
+            clientKey: key,
+            task: {
+                type: "TurnstileTask",
+                websiteURL: CAPTCHA_SOLVER.websiteURL,
+                websiteKey: sitekey,
+                proxyType: p.proxyType,
+                proxyAddress: p.proxyAddress,
+                proxyPort: p.proxyPort,
+                proxyLogin: p.proxyLogin,
+                proxyPassword: p.proxyPassword
+            }
+        };
+        const created = await fetch("https://api.capmonster.cloud/createTask", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(createBody)
+        }).then(r => r.json());
+        if (created.errorId) throw new Error("CapMonster create: " + (created.errorDescription || created.errorCode || JSON.stringify(created)));
+        const taskId = created.taskId;
+        for (let i = 0; i < 60; i++) {
+            await new Promise(r => setTimeout(r, 3000));
+            if (verificationCancelled(verificationRef)) throw new Error("Bot connection cancelled.");
+            const polled = await fetch("https://api.capmonster.cloud/getTaskResult", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ clientKey: key, taskId })
+            }).then(r => r.json());
+            if (polled.errorId) throw new Error("CapMonster result: " + (polled.errorDescription || polled.errorCode));
+            if (polled.status === "ready" && polled.solution?.token) return polled.solution.token;
+        }
+        throw new Error("CapMonster timeout waiting for Turnstile token");
+    }
+
+    // set by createSocket so solver can cancel
+    let verificationRef = null;
+    function verificationCancelled(v) {
+        return Boolean(v?.isCancelled?.());
+    }
+
     const createSocket = async (serverAddress = null, verification = null) => {
         const socket = client.SocketManager.socket;
         if (!serverAddress && (!socket || socket.readyState !== socket.OPEN)) throw new Error("Connect the main player to a server first.");
         const server = serverAddress || new URL(socket.url).origin;
-        const token = await BotVerification.requestToken(verification);
+        verificationRef = verification;
+        if (verification?.isCancelled?.()) throw new Error("Bot connection cancelled.");
+
+        const provider = (CAPTCHA_SOLVER.provider || "browser").toLowerCase();
+        const wantProxy = BOT_PROXIES.length > 0;
+        let slot = null;
+        let token = null;
+        let usedProxyToken = false;
+
+        // Acquire proxy slot early only if we might use proxy-bound token
+        if (wantProxy && (provider === "local" || provider === "auto")) {
+            slot = BotProxy.acquire();
+            if (!slot && provider === "local") {
+                verificationRef = null;
+                throw new Error(`Все прокси заняты (${BOT_PROXIES.length} × ${BOT_PER_PROXY} ботов).`);
+            }
+        }
+
+        try {
+            // 1) Try Theyka/bridge with proxy IP
+            if (slot && (provider === "local" || provider === "auto")) {
+                try {
+                    if (verification?.session) {
+                        BotVerification.updateBatch(verification.session, "Token via proxy (Theyka/bridge)…");
+                    }
+                    token = await solveTurnstileWithProxy(BotVerification.sitekey, slot.proxy);
+                    usedProxyToken = true;
+                } catch (proxyErr) {
+                    console.warn("[Colean] Proxy token failed:", proxyErr?.message || proxyErr);
+                    if (provider === "local") {
+                        BotProxy.release(slot);
+                        slot = null;
+                        verificationRef = null;
+                        throw proxyErr;
+                    }
+                    // auto → fall back to browser captcha
+                    BotProxy.release(slot);
+                    slot = null;
+                    if (verification?.session) {
+                        BotVerification.updateBatch(verification.session, "Proxy captcha failed → browser Turnstile (bot without proxy)");
+                    }
+                }
+            }
+
+            // 2) Browser Turnstile in Colean UI (your IP)
+            if (!token) {
+                if (verification?.session) {
+                    BotVerification.updateBatch(verification.session, "Complete Cloudflare in the panel…");
+                }
+                token = await BotVerification.requestToken(verification);
+                usedProxyToken = false;
+            }
+        } catch (e) {
+            BotProxy.release(slot);
+            verificationRef = null;
+            throw e;
+        }
+
         if (!serverAddress && (client.SocketManager.socket !== socket || socket.readyState !== socket.OPEN)) {
+            BotProxy.release(slot);
+            verificationRef = null;
             throw new Error("The main connection changed during verification. Please try again.");
         }
-        if (verification?.isCancelled?.()) throw new Error("Bot connection cancelled.");
+        if (verification?.isCancelled?.()) {
+            BotProxy.release(slot);
+            verificationRef = null;
+            throw new Error("Bot connection cancelled.");
+        }
+
         const url = new URL(server);
         url.searchParams.set("token", "cf:" + token);
 
-        let slot = null, target = url.href;
-        if (BOT_PROXIES.length) {
-            slot = BotProxy.acquire();
-            if (!slot) throw new Error(`Все прокси заняты (${BOT_PROXIES.length} × ${BOT_PER_PROXY} ботов).`);
+        // Proxy only when token was solved on that proxy IP
+        let target = url.href;
+        const allowProxy = usedProxyToken && slot && !(CAPTCHA_SOLVER.skipProxyOnBrowserToken && !usedProxyToken);
+        if (allowProxy && slot) {
             target = `${BOT_PROXY_RELAY}/?proxy=${encodeURIComponent(slot.proxy)}&url=${encodeURIComponent(url.href)}`;
+        } else {
+            // Direct WS — same IP as browser captcha → no CF mismatch kick
+            BotProxy.release(slot);
+            slot = null;
+            if (wantProxy && !usedProxyToken) {
+                console.info("[Colean] Bot connects DIRECT (no SOCKS): browser token IP must match game IP.");
+            }
         }
 
         let ws;
-        try { ws = new WebSocket(target); }
-        catch (e) { BotProxy.release(slot); throw e; }
+        try {
+            ws = new WebSocket(target);
+        } catch (e) {
+            BotProxy.release(slot);
+            verificationRef = null;
+            throw e;
+        }
         if (slot) {
-            Object.defineProperty(ws, "url", {value: url.href});
-            ws.addEventListener("close", () => BotProxy.release(slot), {once: true});
-            ws.addEventListener("error", () => BotProxy.release(slot), {once: true});
+            Object.defineProperty(ws, "url", { value: url.href });
+            ws.addEventListener("close", () => BotProxy.release(slot), { once: true });
+            ws.addEventListener("error", () => BotProxy.release(slot), { once: true });
         }
         ws.binaryType = "arraybuffer";
+        verificationRef = null;
         return ws;
     };
-    const createSocket_default = createSocket;
+const createSocket_default = createSocket;
 
         // External host auth (bridge)
-    window.ColeanBotAuth = window.GlotusBotAuth = {
+    window.ColeanBotAuth = window.ColeanBotAuth = {
         requestToken(context) {
             return BotVerification.requestToken(context || null);
         },
@@ -2093,7 +2248,7 @@ window.grbtp = 35;
 
     const Navbar_default = '<div id="navbar-container">\r\n    <button data-id="0" class="open-menu active">\r\n        <span>\r\n            <svg class="small-icon" xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512"><path fill="currentColor" d="M240 6.1c9.1-8.2 22.9-8.2 32 0l232 208c9.9 8.8 10.7 24 1.8 33.9s-24 10.7-33.9 1.8l-8-7.2v205.3c0 35.3-28.7 64-64 64h-288c-35.3 0-64-28.7-64-64V242.6l-8 7.2c-9.9 8.8-25 8-33.9-1.8s-8-25 1.8-33.9zm16 50.1L96 199.7V448c0 8.8 7.2 16 16 16h48V360c0-39.8 32.2-72 72-72h48c39.8 0 72 32.2 72 72v104h48c8.8 0 16-7.2 16-16V199.7L256 56.3zM208 464h96V360c0-13.3-10.7-24-24-24h-48c-13.3 0-24 10.7-24 24z"/></svg>\r\n            Home\r\n        </span>\r\n    </button>\r\n    <button data-id="1" class="open-menu">\r\n        <span>\r\n            <svg class="small-icon" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24"><path fill="currentColor" d="M6.21 13.29a.9.9 0 0 0-.33-.21a1 1 0 0 0-.76 0a.9.9 0 0 0-.54.54a1 1 0 1 0 1.84 0a1 1 0 0 0-.21-.33M13.5 11h1a1 1 0 0 0 0-2h-1a1 1 0 0 0 0 2m-4 0h1a1 1 0 0 0 0-2h-1a1 1 0 0 0 0 2m-3-2h-1a1 1 0 0 0 0 2h1a1 1 0 0 0 0-2M20 5H4a3 3 0 0 0-3 3v8a3 3 0 0 0 3 3h16a3 3 0 0 0 3-3V8a3 3 0 0 0-3-3m1 11a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V8a1 1 0 0 1 1-1h16a1 1 0 0 1 1 1Zm-6-3H9a1 1 0 0 0 0 2h6a1 1 0 0 0 0-2m3.5-4h-1a1 1 0 0 0 0 2h1a1 1 0 0 0 0-2m.71 4.29a1 1 0 0 0-.33-.21a1 1 0 0 0-.76 0a.9.9 0 0 0-.33.21a1 1 0 0 0-.21.33a1 1 0 1 0 1.92.38a.84.84 0 0 0-.08-.38a1 1 0 0 0-.21-.33"/></svg>\r\n            Keybinds\r\n        </span>\r\n    </button>\r\n    <button data-id="2" class="open-menu">\r\n        <span>\r\n            <svg class="small-icon" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24"><path fill="currentColor" d="m19.05 21.6l-2.925-2.9l-2.2 2.2l-.7-.7q-.575-.575-.575-1.425t.575-1.425l4.225-4.225q.575-.575 1.425-.575t1.425.575l.7.7l-2.2 2.2l2.9 2.925q.3.3.3.7t-.3.7l-1.25 1.25q-.3.3-.7.3t-.7-.3M22 5.9L10.65 17.25l.125.1q.575.575.575 1.425t-.575 1.425l-.7.7l-2.2-2.2l-2.925 2.9q-.3.3-.7.3t-.7-.3L2.3 20.35q-.3-.3-.3-.7t.3-.7l2.9-2.925l-2.2-2.2l.7-.7q.575-.575 1.425-.575t1.425.575l.1.125L18 1.9h4zM6.95 10.85L2 5.9v-4h4l4.95 4.95z"/></svg>\r\n            Combat\r\n        </span>\r\n    </button>\r\n    <button data-id="3" class="open-menu">\r\n        <span>\r\n            <svg class="small-icon" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><path d="M12 5c-6.307 0-9.367 5.683-9.91 6.808a.44.44 0 0 0 0 .384C2.632 13.317 5.692 19 12 19s9.367-5.683 9.91-6.808a.44.44 0 0 0 0-.384C21.368 10.683 18.308 5 12 5"/><circle cx="12" cy="12" r="3"/></g></svg>\r\n            Visuals\r\n        </span>\r\n    </button>\r\n    <button data-id="4" class="open-menu">\r\n        <span>\r\n            <svg class="small-icon" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24"><path fill="currentColor" d="M2 18h7v2H2zm0-7h9v2H2zm0-7h20v2H2zm18.674 9.025l1.156-.391l1 1.732l-.916.805a4 4 0 0 1 0 1.658l.916.805l-1 1.732l-1.156-.391a4 4 0 0 1-1.435.83L19 21h-2l-.24-1.196a4 4 0 0 1-1.434-.83l-1.156.392l-1-1.732l.916-.805a4 4 0 0 1 0-1.658l-.916-.805l1-1.732l1.156.391c.41-.37.898-.655 1.435-.83L17 11h2l.24 1.196a4 4 0 0 1 1.434.83M18 17a1 1 0 1 0 0-2a1 1 0 0 0 0 2"/></svg>\r\n            Misc\r\n        </span>\r\n    </button>\r\n    <button data-id="5" class="open-menu">\r\n        <span>\r\n            <svg class="small-icon" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24"><path fill="currentColor" d="M22 14h-1c0-3.87-3.13-7-7-7h-1V5.73A2 2 0 1 0 10 4c0 .74.4 1.39 1 1.73V7h-1c-3.87 0-7 3.13-7 7H2c-.55 0-1 .45-1 1v3c0 .55.45 1 1 1h1v1a2 2 0 0 0 2 2h14c1.11 0 2-.89 2-2v-1h1c.55 0 1-.45 1-1v-3c0-.55-.45-1-1-1m-1 3h-2v3H5v-3H3v-1h2v-2c0-2.76 2.24-5 5-5h4c2.76 0 5 2.24 5 5v2h2zm-3.5-1.5c0 1.11-.89 2-2 2c-.97 0-1.77-.69-1.96-1.6l2.96-2.12c.6.35 1 .98 1 1.72m-10-1.72l2.96 2.12c-.18.91-.99 1.6-1.96 1.6a2 2 0 0 1-2-2c0-.74.4-1.37 1-1.72"/></svg>\r\n            Bots\r\n        </span>\r\n    </button>\r\n    <button data-id="6" class="open-menu bottom-align">\r\n        <span>\r\n            <svg class="small-icon" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24"><path fill="currentColor" d="m19.546 7.573l-1.531-1.57l-1.442 1.291l-.959.86l3.876 3.987l-2.426 2.496l-1.451 1.492c.55.499 1.091.99 1.64 1.486l.764.694l2.21-2.277L24 12.14v-.001zM2.992 9.072L0 12.14c2.01 2.073 3.993 4.115 5.984 6.167l.51-.464l1.893-1.715L6.94 14.64l-2.43-2.5l3.109-3.196l.767-.789c-.434-.39-.86-.772-1.288-1.154L5.984 6v.001zm12.585-6.038L11.632 21.6l-.196-.039l-3.029-.595l2.555-12.02L12.353 2.4z"/></svg>\r\n            Devtool\r\n        </span>\r\n    </button>\r\n</div>';
 
-    const Home_default = '<div class="menu-page opened" data-id="0">\r\n    <div class="page-title">Home</div>\r\n\r\n    <div class="section">\r\n        <div class="section-title">Welcome to the Colean Client!</div>\r\n        <div class="section-content">\r\n\r\n            <div class="content-option left-flex text">\r\n                <span class="option-title">Author: </span>\r\n                <span id="author" class="text-value">ItzYakudza</span>\r\n            </div>\r\n\r\n            <div class="content-option left-flex text">\r\n                <a href="https://discord.gg/cPRFdcZkeD" class="text-value" target="_blank">\r\n                    <svg class="icon link" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24"><path fill="currentColor" d="M19.303 5.337A17.3 17.3 0 0 0 14.963 4c-.191.329-.403.775-.552 1.125a16.6 16.6 0 0 0-4.808 0C9.454 4.775 9.23 4.329 9.05 4a17 17 0 0 0-4.342 1.337C1.961 9.391 1.218 13.35 1.59 17.255a17.7 17.7 0 0 0 5.318 2.664a13 13 0 0 0 1.136-1.836c-.627-.234-1.22-.52-1.794-.86c.149-.106.297-.223.435-.34c3.46 1.582 7.207 1.582 10.624 0c.149.117.287.234.435.34c-.573.34-1.167.626-1.793.86a13 13 0 0 0 1.135 1.836a17.6 17.6 0 0 0 5.318-2.664c.457-4.52-.722-8.448-3.1-11.918M8.52 14.846c-1.04 0-1.889-.945-1.889-2.101s.828-2.102 1.89-2.102c1.05 0 1.91.945 1.888 2.102c0 1.156-.838 2.1-1.889 2.1m6.974 0c-1.04 0-1.89-.945-1.89-2.101s.828-2.102 1.89-2.102c1.05 0 1.91.945 1.889 2.102c0 1.156-.828 2.1-1.89 2.1"/>\r\n                    </svg>\r\n                </a>\r\n\r\n                <a href="https://github.com/ItzYakudza/Colean-Client" class="text-value" target="_blank">\r\n                    <svg class="icon link" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24"><path fill="currentColor" d="M12 2A10 10 0 0 0 2 12c0 4.42 2.87 8.17 6.84 9.5c.5.08.66-.23.66-.5v-1.69c-2.77.6-3.36-1.34-3.36-1.34c-.46-1.16-1.11-1.47-1.11-1.47c-.91-.62.07-.6.07-.6c1 .07 1.53 1.03 1.53 1.03c.87 1.52 2.34 1.07 2.91.83c.09-.65.35-1.09.63-1.34c-2.22-.25-4.55-1.11-4.55-4.92c0-1.11.38-2 1.03-2.71c-.1-.25-.45-1.29.1-2.64c0 0 .84-.27 2.75 1.02c.79-.22 1.65-.33 2.5-.33s1.71.11 2.5.33c1.91-1.29 2.75-1.02 2.75-1.02c.55 1.35.2 2.39.1 2.64c.65.71 1.03 1.6 1.03 2.71c0 3.82-2.34 4.66-4.57 4.91c.36.31.69.92.69 1.85V21c0 .27.16.59.67.5C19.14 20.16 22 16.42 22 12A10 10 0 0 0 12 2"/></svg>\r\n                </a>\r\n\r\n                <a href="https://greasyfork.org/en/users/919633-murka007" class="text-value" target="_blank">\r\n                    <svg class="icon link" version="1.1" viewBox="0 0 96 96" xmlns="http://www.w3.org/2000/svg">\r\n                    <circle cx="48" cy="48" r="48"/>\r\n                    <clipPath id="a">\r\n                    <circle cx="48" cy="48" r="47"/>\r\n                    </clipPath>\r\n                    <text clip-path="url(#a)" fill="#fff" font-family="\'DejaVu Sans\', Verdana, Arial, \'Liberation Sans\', sans-serif" font-size="18" letter-spacing="-.75" pointer-events="none" text-anchor="middle" style="-moz-user-select:none;-ms-user-select:none;-webkit-user-select:none;user-select:none"><tspan x="51" y="13" textLength="57">= null;</tspan> <tspan x="56" y="35" textLength="98">function init</tspan> <tspan x="49" y="57" textLength="113">for (const i = 0;</tspan> <tspan x="50" y="79" textLength="105">XmlHttpReq</tspan> <tspan x="48" y="101" textLength="80">appendCh</tspan></text>\r\n                    <path d="m44 29a6.364 6.364 0 0 1 0 9l36 36a3.25 3.25 0 0 1-6.5 6.5l-36-36a6.364 6.364 0 0 1-9 0l-19-19a1.7678 1.7678 0 0 1 0-2.5l13-13a1.7678 1.7678 0 0 1 2.5 0z" stroke="#000" stroke-width="4"/>\r\n                    <path d="m44 29a6.364 6.364 0 0 1 0 9l36 36a3.25 3.25 0 0 1-6.5 6.5l-36-36a6.364 6.364 0 0 1-9 0l-19-19a1.7678 1.7678 0 0 1 2.5-2.5l14 14 4-4-14-14a1.7678 1.7678 0 0 1 2.5-2.5l14 14 4-4-14-14a1.7678 1.7678 0 0 1 2.5-2.5z" fill="#fff"/>\r\n                    </svg>\r\n                </a>\r\n\r\n            </div>\r\n\r\n            <div class="content-option left-flex text">\r\n                <span class="option-title">Building hash: </span>\r\n                <span id="author" class="text-value">WjozCQUhJYXYFg4</span>\r\n            </div>\r\n\r\n        </div>\r\n    </div>\r\n\r\n    <div class="section">\r\n        <div class="section-content">\r\n            \r\n            <div class="content-option text">\r\n                <span class="text-value simplified">Leaking source code myself.. <span class="highlight">unfortunately</span>. The reason you can read this message and use this client is quite tragic, for more info join my discord server and check annoucements channel. I\'ll leave the source and its up to you to decide what to do with it. Just make sure to put my credits, as the original author of this client.</span>\r\n            </div>\r\n            \r\n            <div class="content-option text">\r\n                <span class="text-value simplified">My main goal in creating this hack was to automate absolutely everything. So don\'t be surprised by the lack of numerous hotkeys - not even for switching weapons. This client is designed for simple <span class="highlight">WASD</span> movement and primarly <span class="highlight">polearm + hammer</span>, which is what makes it great. There\'s no need to remember dozens of hotkeys, chat commands, or anything else.</span>\r\n            </div>\r\n            \r\n            <div class="content-option text">\r\n                <span class="text-value simplified">This client is <span class="highlight">no longer</span> under active development, so all future updates will rely entirely on community contributions. I strongly recommend to not edit the code in Tampermonkey and switch to a proper IDE instead. You\'ll safe your time by <span class="highlight">a lot!</span></span>\r\n            </div>\r\n        </div>\r\n    </div>\r\n\r\n</div>';
+    const Home_default = "<div class=\"menu-page opened\" data-id=\"0\">\r\n    <div class=\"page-title\">Home</div>\r\n\r\n    <div class=\"section\">\r\n        <div class=\"section-title\">Welcome to the Colean Client!</div>\r\n        <div class=\"section-content\">\r\n\r\n            <div class=\"content-option left-flex text\">\r\n                <span class=\"option-title\">Author: </span>\r\n                <span id=\"author\" class=\"text-value\">ItzYakudza</span>\r\n            </div>\r\n\r\n        </div>\r\n    </div>\r\n\r\n</div>";
 
     const Keybinds_default = '<div class="menu-page" data-id="1">\r\n    <div class="page-title">Keybinds</div>\r\n    <p class="page-description">Setup keybinds for items, weapons and hats</p>\r\n\r\n    \x3c!-- Items & Weapons --\x3e\r\n    <div class="section">\r\n        <div class="section-title">Items & Weapons</div>\r\n        <div class="section-content split">\r\n\r\n            <div class="content-split">\r\n                <div class="content-option">\r\n                    <span class="option-title">Food</span>\r\n                    <button id="_food" class="hotkeyInput"></button>\r\n                    <span class="option-description">It is useful to press this button, when you have a really high ping. Because AutoQ is not able to detect such threats</span>\r\n                </div>\r\n\r\n                <div class="content-option">\r\n                    <span class="option-title">Wall</span>\r\n                    <button id="_wall" class="hotkeyInput"></button>\r\n                </div>\r\n\r\n                <div class="content-option">\r\n                    <span class="option-title">Spike</span>\r\n                    <button id="_spike" class="hotkeyInput"></button>\r\n                </div>\r\n\r\n                <div class="content-option">\r\n                    <span class="option-title">Windmill</span>\r\n                    <button id="_windmill" class="hotkeyInput"></button>\r\n                </div>\r\n            </div>\r\n\r\n            <div class="content-split">\r\n                <div class="content-option">\r\n                    <span class="option-title">Farm</span>\r\n                    <button id="_farm" class="hotkeyInput"></button>\r\n                    <span class="option-description">Places trees/mines</span>\r\n                </div>\r\n\r\n                <div class="content-option">\r\n                    <span class="option-title">Trap</span>\r\n                    <button id="_trap" class="hotkeyInput"></button>\r\n                    <span class="option-description">Places traps/boostpads</span>\r\n                </div>\r\n\r\n                <div class="content-option">\r\n                    <span class="option-title">Turret</span>\r\n                    <button id="_turret" class="hotkeyInput"></button>\r\n                    <span class="option-description">Places turrets, teleports, platforms etc</span>\r\n                </div>\r\n\r\n                <div class="content-option">\r\n                    <span class="option-title">Spawn</span>\r\n                    <button id="_spawn" class="hotkeyInput"></button>\r\n                </div>\r\n            </div>\r\n        </div>\r\n    </div>\r\n\r\n    \x3c!-- Controls & Movement --\x3e\r\n    <div class="section">\r\n        <div class="section-title">Controls & Movement</div>\r\n        <div class="section-content">\r\n\r\n            <div class="content-split">\r\n\r\n                <div class="content-option">\r\n                    <span class="option-title">Lock bot position</span>\r\n                    <button id="_lockBotPosition" class="hotkeyInput"></button>\r\n                    <span class="option-description">Press this button and bots will be locked to your last cursor position</span>\r\n                </div>\r\n\r\n                <div class="content-option">\r\n                    <span class="option-title">Toggle Shop</span>\r\n                    <button id="_toggleShop" class="hotkeyInput"></button>\r\n                </div>\r\n\r\n                <div class="content-option">\r\n                    <span class="option-title">Toggle Clan</span>\r\n                    <button id="_toggleClan" class="hotkeyInput"></button>\r\n                </div>\r\n\r\n                <div class="content-option">\r\n                    <span class="option-title">Toggle Menu</span>\r\n                    <button id="_toggleMenu" class="hotkeyInput"></button>\r\n                    <span class="option-description">Press this button to open and close the menu</span>\r\n                </div>\r\n\r\n                <div class="content-option">\r\n                    <span class="option-title">Instakill</span>\r\n                    <button id="_instakill" class="hotkeyInput"></button>\r\n                </div>\r\n\r\n            </div>\r\n        </div>\r\n    </div>\r\n</div>';
 
@@ -2105,11 +2260,11 @@ window.grbtp = 35;
 
     const Devtool_default = '<div class="menu-page" data-id="6">\r\n    <div class="page-title">Devtool</div>\r\n    <p class="page-description">Test Colean Client and report about bugs!</p>\r\n\r\n\r\n    \x3c!-- myPlayer --\x3e\r\n    <div class="section">\r\n        <h2 class="section-title">myPlayer</h2>\r\n\r\n        <div class="section-content">\r\n\r\n            <div class="content-option">\r\n                <span class="option-title">Display player angle</span>\r\n                <label class="switch-checkbox">\r\n                    <input id="_displayPlayerAngle" type="checkbox"></input>\r\n                    <span></span>\r\n                </label>\r\n            </div>\r\n\r\n        </div>\r\n    </div>\r\n\r\n\r\n    \x3c!-- Hitboxes --\x3e\r\n    <div class="section">\r\n        <h2 class="section-title">Hitboxes</h2>\r\n\r\n        <div class="section-content">\r\n\r\n            <div class="content-option">\r\n                <span class="option-title">Weapon hitbox</span>\r\n                <label class="switch-checkbox">\r\n                    <input id="_weaponHitbox" type="checkbox"></input>\r\n                    <span></span>\r\n                </label>\r\n            </div>\r\n\r\n            <div class="content-option">\r\n                <span class="option-title">Collision hitbox</span>\r\n                <label class="switch-checkbox">\r\n                    <input id="_collisionHitbox" type="checkbox"></input>\r\n                    <span></span>\r\n                </label>\r\n            </div>\r\n\r\n            <div class="content-option">\r\n                <span class="option-title">Placement hitbox</span>\r\n                <label class="switch-checkbox">\r\n                    <input id="_placementHitbox" type="checkbox"></input>\r\n                    <span></span>\r\n                </label>\r\n            </div>\r\n\r\n            <div class="content-option">\r\n                <span class="option-title">Possible placement</span>\r\n                <label class="switch-checkbox">\r\n                    <input id="_possiblePlacement" type="checkbox"></input>\r\n                    <span></span>\r\n                </label>\r\n            </div>\r\n\r\n        </div>\r\n    </div>\r\n\r\n    \x3c!-- Statistics --\x3e\r\n    <div class="section">\r\n        <h2 class="section-title">Statistics</h2>\r\n\r\n        <div class="section-content small-section">\r\n\r\n            <div class="content-option left-flex text">\r\n                <span class="option-title">Total kills: </span>\r\n                <span id="_totalKills" class="text-value">0</span>\r\n            </div>\r\n\r\n            <div class="content-option left-flex text">\r\n                <span class="option-title">Global kills with bots: </span>\r\n                <span id="_globalKills" class="text-value">0</span>\r\n            </div>\r\n\r\n            <div class="content-option left-flex text">\r\n                <span class="option-title">Deaths: </span>\r\n                <span id="_deaths" class="text-value">0</span>\r\n            </div>\r\n\r\n            <div class="content-option left-flex text">\r\n                <span class="option-title">Autosync: </span>\r\n                <span id="_autoSyncTimes" class="text-value">0</span>\r\n            </div>\r\n\r\n            <div class="content-option left-flex text">\r\n                <span class="option-title">Velocity tick: </span>\r\n                <span id="_velocityTickTimes" class="text-value">0</span>\r\n            </div>\r\n\r\n            <div class="content-option left-flex text">\r\n                <span class="option-title">SSHammer: </span>\r\n                <span id="_spikeSyncHammerTimes" class="text-value">0</span>\r\n            </div>\r\n\r\n            <div class="content-option left-flex text">\r\n                <span class="option-title">Spike sync: </span>\r\n                <span id="_spikeSyncTimes" class="text-value">0</span>\r\n            </div>\r\n\r\n            <div class="content-option left-flex text">\r\n                <span class="option-title">Spike tick: </span>\r\n                <span id="_spikeTickTimes" class="text-value">0</span>\r\n            </div>\r\n\r\n            <div class="content-option left-flex text">\r\n                <span class="option-title">KBTrap: </span>\r\n                <span id="_knockbackTickTrapTimes" class="text-value">0</span>\r\n            </div>\r\n\r\n            <div class="content-option left-flex text">\r\n                <span class="option-title">KBHammer: </span>\r\n                <span id="_knockbackTickHammerTimes" class="text-value">0</span>\r\n            </div>\r\n\r\n            <div class="content-option left-flex text">\r\n                <span class="option-title">KB Reg: </span>\r\n                <span id="_knockbackTickTimes" class="text-value">0</span>\r\n            </div>\r\n\r\n            <div class="content-option left-flex text">\r\n                <span class="option-title">Author: </span>\r\n                <span id="author" class="text-value">ItzYakudza</span>\r\n            </div>\r\n\r\n        </div>\r\n    </div>\r\n\r\n</div>';
 
-    const Bots_default = "<div class=\"menu-page\" data-id=\"5\"><div class=\"page-title\">Bots</div><style>\n    .bot-dropdown{width:270px;position:relative;z-index:5;margin:16px 0;font-size:16px;font-family:\"Noto Sans\",sans-serif}\n    .bot-dropdown button{width:100%;height:42px;display:flex;align-items:center;justify-content:space-between;padding:0 14px;border:1px solid #30343a;border-radius:5px;background:#101215;color:#c0c5ca;font:inherit;font-weight:800;cursor:pointer}\n    .bot-dropdown button:hover{background:#34383d;color:#f2f4f6}.bot-dropdown button:disabled{opacity:.45;cursor:not-allowed}\n    .bot-dropdown-options{position:absolute;top:46px;left:0;width:100%;padding:4px;background:#0a0c10;border:1px solid #30343a;border-radius:5px;box-shadow:0 8px 18px #0006;box-sizing:border-box}\n    .bot-dropdown-options[hidden],#local-bot-panel[hidden],#cross-server-panel[hidden]{display:none!important}\n    .bot-dropdown-arrow{color:#888c92}#cross-server-panel{font-family:\"Noto Sans\",sans-serif;color:#a0a5aa;font-weight:800}\n    .cross-server-row{display:flex;align-items:center;gap:16px;padding:6px 12px;border-radius:5px}.cross-server-row.current-server{background:#30343a66}\n    .cross-server-name{font-size:24px;flex:1;overflow-wrap:anywhere}.cross-server-detail{font-size:16px;text-align:right}\n    .cross-add-bot{flex-shrink:0}.cross-add-bot:disabled{opacity:.45;cursor:not-allowed}.cross-server-actions{display:flex;gap:10px;flex-wrap:wrap;justify-content:center;margin:12px 0}\n    #cross-server-list-status,#cross-server-status,#cross-batch-status{padding:8px 12px;font-size:14px}#cross-connected-bots{padding:0 12px}\n    #cross-server-panel .option-button:disabled{opacity:.45;cursor:not-allowed}\n    @media(max-width:720px){.cross-server-row{flex-wrap:wrap;gap:8px}.cross-server-detail{font-size:14px}.cross-server-name{font-size:20px}}\n  </style>\n  <div id=\"bot-family-switcher\" class=\"bot-dropdown\" data-current-menu=\"bots\">\n    <button id=\"bot-family-trigger\" type=\"button\" aria-expanded=\"false\" aria-controls=\"bot-family-options\"><span id=\"bot-family-label\">Bot Menu</span><span id=\"bot-family-arrow\" class=\"bot-dropdown-arrow\" aria-hidden=\"true\">▼</span></button>\n    <div id=\"bot-family-options\" class=\"bot-dropdown-options\" hidden><button id=\"bot-family-option\" type=\"button\">Cross-Server Menu</button></div>\n  </div><div id=\"local-bot-panel\"><style>#connected-bot-list,#bot-status{font-family:\"Noto Sans\",sans-serif;font-weight:800;font-size:1.1rem;color:#c0c5ca}.loadout-switch{position:relative;display:inline-block;width:70px;height:28px;flex-shrink:0}.loadout-switch input{position:absolute;opacity:0;width:100%;height:100%;margin:0;cursor:pointer}.loadout-switch>span{display:block;width:100%;height:100%;border-radius:5px;background:#30343a;pointer-events:none}.loadout-switch>span:after{content:\"\";position:absolute;top:4px;left:5px;width:20px;height:20px;border-radius:3px;background:#646970;transition:left .12s,background .12s}.loadout-switch input:checked+span:after{left:45px;background:#989da3}.loadout-switch input:focus-visible+span{outline:2px solid #b5b5b5}</style><div class=\"section\"><div class=\"section-title\">Manual Aim</div><div class=\"section-content\"><div class=\"content-option\"><span class=\"option-title\">Manual Aim</span><label class=\"switch-checkbox\"><input type=\"checkbox\" id=\"_manualAim\"><span></span></label></div><p>Use 1 / 2 or click a weapon in the action bar to select it. Left click aims at your cursor. Applies to you and your bots; all combat features remain active and temporarily control weapons and aim during their attacks.</p></div></div><div class=\"section\"><div class=\"section-title\">Bot Nickname</div><div class=\"section-content\"><div class=\"content-option\"><span class=\"option-title\">Nickname</span><input id=\"_botNickname\" class=\"input\" type=\"text\" maxlength=\"15\" placeholder=\"random\"></div><div class=\"content-option\"><span class=\"option-title\">Add bot number</span><label class=\"switch-checkbox\"><input id=\"_botNickNumber\" type=\"checkbox\"><span></span></label></div><p>Applies to bots added after the change. Empty nickname means a random bot name. The game limits names to 15 characters.</p></div></div><div class=\"section\"><div class=\"section-title\">Choose weapons for bots</div><div class=\"section-content\" style=\"display:block\"><p>Primary weapon</p><div style=\"display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:10px\"><label class=\"content-option\" style=\"display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px;cursor:pointer\"><span class=\"option-title\">Stick</span><span class=\"loadout-switch\"><input type=\"radio\" aria-label=\"Stick\" name=\"bot-primary\" value=\"8\"><span></span></span></label><label class=\"content-option\" style=\"display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px;cursor:pointer\"><span class=\"option-title\">Sword</span><span class=\"loadout-switch\"><input type=\"radio\" aria-label=\"Sword\" name=\"bot-primary\" value=\"3\"><span></span></span></label><label class=\"content-option\" style=\"display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px;cursor:pointer\"><span class=\"option-title\">Bat</span><span class=\"loadout-switch\"><input type=\"radio\" aria-label=\"Bat\" name=\"bot-primary\" value=\"6\"><span></span></span></label><label class=\"content-option\" style=\"display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px;cursor:pointer\"><span class=\"option-title\">Spear</span><span class=\"loadout-switch\"><input type=\"radio\" aria-label=\"Spear\" name=\"bot-primary\" value=\"5\"><span></span></span></label><label class=\"content-option\" style=\"display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px;cursor:pointer\"><span class=\"option-title\">Daggers</span><span class=\"loadout-switch\"><input type=\"radio\" aria-label=\"Daggers\" name=\"bot-primary\" value=\"7\"><span></span></span></label><label class=\"content-option\" style=\"display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px;cursor:pointer\"><span class=\"option-title\">Axe</span><span class=\"loadout-switch\"><input type=\"radio\" aria-label=\"Axe\" name=\"bot-primary\" value=\"1\"><span></span></span></label></div><p>Secondary weapon</p><div style=\"display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:10px\"><label class=\"content-option\" style=\"display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px;cursor:pointer\"><span class=\"option-title\">Repeater</span><span class=\"loadout-switch\"><input type=\"radio\" aria-label=\"Repeater\" name=\"bot-secondary\" value=\"13\"><span></span></span></label><label class=\"content-option\" style=\"display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px;cursor:pointer\"><span class=\"option-title\">Musket</span><span class=\"loadout-switch\"><input type=\"radio\" aria-label=\"Musket\" name=\"bot-secondary\" value=\"15\"><span></span></span></label><label class=\"content-option\" style=\"display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px;cursor:pointer\"><span class=\"option-title\">Shield</span><span class=\"loadout-switch\"><input type=\"radio\" aria-label=\"Shield\" name=\"bot-secondary\" value=\"11\"><span></span></span></label><label class=\"content-option\" style=\"display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px;cursor:pointer\"><span class=\"option-title\">Hammer</span><span class=\"loadout-switch\"><input type=\"radio\" aria-label=\"Hammer\" name=\"bot-secondary\" value=\"10\"><span></span></span></label></div><p>One choice per group. Choices apply at the next available upgrade or after respawning. Bots always choose Cookie, Greater Spikes and Platform, and continue their selected weapon upgrades.</p></div></div><div class=\"section\"><div class=\"section-content\"><div id=\"connected-bot-list\" style=\"width:100%\"></div><div class=\"content-option centered\"><button id=\"add-bot\" class=\"option-button\">Add Bot</button><button id=\"remove-bots\" class=\"option-button\">Remove Bots</button></div><div id=\"bot-status\" role=\"status\"></div></div></div></div><div id=\"cross-server-panel\" hidden>\n    <div class=\"section\"><div class=\"section-title\">Servers</div>\n    <div id=\"cross-server-type-switcher\" class=\"bot-dropdown\" data-server-type=\"normal\">\n      <button id=\"cross-server-type-trigger\" type=\"button\" aria-expanded=\"false\" aria-controls=\"cross-server-type-options\"><span id=\"cross-server-type-label\">Normal Servers</span><span id=\"cross-server-type-arrow\" class=\"bot-dropdown-arrow\" aria-hidden=\"true\">▼</span></button>\n      <div id=\"cross-server-type-options\" class=\"bot-dropdown-options\" hidden><button id=\"cross-server-type-option\" type=\"button\" data-server-type=\"sandbox\">Sandbox Servers</button></div>\n    </div>\n    <div class=\"cross-server-actions\"><button id=\"cross-add-all\" class=\"option-button\" type=\"button\" title=\"Add one idle bot to every available normal and sandbox server\">Add Bot to All Servers</button><button id=\"cross-stop-adding\" class=\"option-button\" type=\"button\" disabled>Stop Adding</button><button id=\"cross-refresh\" class=\"option-button\" type=\"button\">Refresh Servers</button></div><div id=\"cross-batch-status\" role=\"status\"></div>\n    <div id=\"cross-server-list\"></div><div id=\"cross-server-list-status\" role=\"status\"></div></div>\n    <div class=\"section\"><div class=\"section-title\">Cross-Server Bots</div><div id=\"cross-connected-bots\"></div>\n    <div class=\"cross-server-actions\"><button id=\"cross-remove-bots\" class=\"option-button\" type=\"button\">Remove Cross-Server Bots</button></div><div id=\"cross-server-status\" role=\"status\"></div></div>\n  </div></div>";
+    const Bots_default = "<div class=\"menu-page\" data-id=\"5\"><div class=\"page-title\">Bots</div><style>\n    .bot-dropdown{width:270px;position:relative;z-index:5;margin:16px 0;font-size:16px;font-family:\"Noto Sans\",sans-serif}\n    .bot-dropdown button{width:100%;height:42px;display:flex;align-items:center;justify-content:space-between;padding:0 14px;border:1px solid #30343a;border-radius:5px;background:#123752;color:#d8e6f2;font:inherit;font-weight:800;cursor:pointer}\n    .bot-dropdown button:hover{background:#1b527a;color:#f0f7ff}.bot-dropdown button:disabled{opacity:.45;cursor:not-allowed}\n    .bot-dropdown-options{position:absolute;top:46px;left:0;width:100%;padding:4px;background:#081726;border:1px solid #2d6b96;border-radius:5px;box-shadow:0 8px 18px #0006;box-sizing:border-box}\n    .bot-dropdown-options[hidden],#local-bot-panel[hidden],#cross-server-panel[hidden]{display:none!important}\n    .bot-dropdown-arrow{color:#888c92}#cross-server-panel{font-family:\"Noto Sans\",sans-serif;color:#a0a5aa;font-weight:800}\n    .cross-server-row{display:flex;align-items:center;gap:16px;padding:6px 12px;border-radius:5px}.cross-server-row.current-server{background:#30343a66}\n    .cross-server-name{font-size:24px;flex:1;overflow-wrap:anywhere}.cross-server-detail{font-size:16px;text-align:right}\n    .cross-add-bot{flex-shrink:0}.cross-add-bot:disabled{opacity:.45;cursor:not-allowed}.cross-server-actions{display:flex;gap:10px;flex-wrap:wrap;justify-content:center;margin:12px 0}\n    #cross-server-list-status,#cross-server-status,#cross-batch-status{padding:8px 12px;font-size:14px}#cross-connected-bots{padding:0 12px}\n    #cross-server-panel .option-button:disabled{opacity:.45;cursor:not-allowed}\n    @media(max-width:720px){.cross-server-row{flex-wrap:wrap;gap:8px}.cross-server-detail{font-size:14px}.cross-server-name{font-size:20px}}\n  </style>\n  <div id=\"bot-family-switcher\" class=\"bot-dropdown\" data-current-menu=\"bots\">\n    <button id=\"bot-family-trigger\" type=\"button\" aria-expanded=\"false\" aria-controls=\"bot-family-options\"><span id=\"bot-family-label\">Bot Menu</span><span id=\"bot-family-arrow\" class=\"bot-dropdown-arrow\" aria-hidden=\"true\">▼</span></button>\n    <div id=\"bot-family-options\" class=\"bot-dropdown-options\" hidden><button id=\"bot-family-option\" type=\"button\">Cross-Server Menu</button></div>\n  </div><div id=\"local-bot-panel\"><style>#connected-bot-list,#bot-status{font-family:\"Noto Sans\",sans-serif;font-weight:800;font-size:1.1rem;color:#c0c5ca}.loadout-switch{position:relative;display:inline-block;width:70px;height:28px;flex-shrink:0}.loadout-switch input{position:absolute;opacity:0;width:100%;height:100%;margin:0;cursor:pointer}.loadout-switch>span{display:block;width:100%;height:100%;border-radius:5px;background:#30343a;pointer-events:none}.loadout-switch>span:after{content:\"\";position:absolute;top:4px;left:5px;width:20px;height:20px;border-radius:3px;background:#646970;transition:left .12s,background .12s}.loadout-switch input:checked+span:after{left:45px;background:#989da3}.loadout-switch input:focus-visible+span{outline:2px solid #b5b5b5}</style><div class=\"section\"><div class=\"section-title\">Manual Aim</div><div class=\"section-content\"><div class=\"content-option\"><span class=\"option-title\">Manual Aim</span><label class=\"switch-checkbox\"><input type=\"checkbox\" id=\"_manualAim\"><span></span></label></div><p>Use 1 / 2 or click a weapon in the action bar to select it. Left click aims at your cursor. Applies to you and your bots; all combat features remain active and temporarily control weapons and aim during their attacks.</p></div></div><div class=\"section\"><div class=\"section-title\">Bot Nickname</div><div class=\"section-content\"><div class=\"content-option\"><span class=\"option-title\">Nickname</span><input id=\"_botNickname\" class=\"input\" type=\"text\" maxlength=\"15\" placeholder=\"random\"></div><div class=\"content-option\"><span class=\"option-title\">Add bot number</span><label class=\"switch-checkbox\"><input id=\"_botNickNumber\" type=\"checkbox\"><span></span></label></div><p>Applies to bots added after the change. Empty nickname means a random bot name. The game limits names to 15 characters.</p></div></div><div class=\"section\"><div class=\"section-title\">Choose weapons for bots</div><div class=\"section-content\" style=\"display:block\"><p>Primary weapon</p><div style=\"display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:10px\"><label class=\"content-option\" style=\"display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px;cursor:pointer\"><span class=\"option-title\">Stick</span><span class=\"loadout-switch\"><input type=\"radio\" aria-label=\"Stick\" name=\"bot-primary\" value=\"8\"><span></span></span></label><label class=\"content-option\" style=\"display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px;cursor:pointer\"><span class=\"option-title\">Sword</span><span class=\"loadout-switch\"><input type=\"radio\" aria-label=\"Sword\" name=\"bot-primary\" value=\"3\"><span></span></span></label><label class=\"content-option\" style=\"display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px;cursor:pointer\"><span class=\"option-title\">Bat</span><span class=\"loadout-switch\"><input type=\"radio\" aria-label=\"Bat\" name=\"bot-primary\" value=\"6\"><span></span></span></label><label class=\"content-option\" style=\"display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px;cursor:pointer\"><span class=\"option-title\">Spear</span><span class=\"loadout-switch\"><input type=\"radio\" aria-label=\"Spear\" name=\"bot-primary\" value=\"5\"><span></span></span></label><label class=\"content-option\" style=\"display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px;cursor:pointer\"><span class=\"option-title\">Daggers</span><span class=\"loadout-switch\"><input type=\"radio\" aria-label=\"Daggers\" name=\"bot-primary\" value=\"7\"><span></span></span></label><label class=\"content-option\" style=\"display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px;cursor:pointer\"><span class=\"option-title\">Axe</span><span class=\"loadout-switch\"><input type=\"radio\" aria-label=\"Axe\" name=\"bot-primary\" value=\"1\"><span></span></span></label></div><p>Secondary weapon</p><div style=\"display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:10px\"><label class=\"content-option\" style=\"display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px;cursor:pointer\"><span class=\"option-title\">Repeater</span><span class=\"loadout-switch\"><input type=\"radio\" aria-label=\"Repeater\" name=\"bot-secondary\" value=\"13\"><span></span></span></label><label class=\"content-option\" style=\"display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px;cursor:pointer\"><span class=\"option-title\">Musket</span><span class=\"loadout-switch\"><input type=\"radio\" aria-label=\"Musket\" name=\"bot-secondary\" value=\"15\"><span></span></span></label><label class=\"content-option\" style=\"display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px;cursor:pointer\"><span class=\"option-title\">Shield</span><span class=\"loadout-switch\"><input type=\"radio\" aria-label=\"Shield\" name=\"bot-secondary\" value=\"11\"><span></span></span></label><label class=\"content-option\" style=\"display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px;cursor:pointer\"><span class=\"option-title\">Hammer</span><span class=\"loadout-switch\"><input type=\"radio\" aria-label=\"Hammer\" name=\"bot-secondary\" value=\"10\"><span></span></span></label></div><p>One choice per group. Choices apply at the next available upgrade or after respawning. Bots always choose Cookie, Greater Spikes and Platform, and continue their selected weapon upgrades.</p></div></div><div class=\"section\"><div class=\"section-content\"><div id=\"connected-bot-list\" style=\"width:100%\"></div><div class=\"content-option centered\"><button id=\"add-bot\" class=\"option-button\">Add Bot</button><button id=\"remove-bots\" class=\"option-button\">Remove Bots</button></div><div id=\"bot-status\" role=\"status\"></div></div></div></div><div id=\"cross-server-panel\" hidden>\n    <div class=\"section\"><div class=\"section-title\">Servers</div>\n    <div id=\"cross-server-type-switcher\" class=\"bot-dropdown\" data-server-type=\"normal\">\n      <button id=\"cross-server-type-trigger\" type=\"button\" aria-expanded=\"false\" aria-controls=\"cross-server-type-options\"><span id=\"cross-server-type-label\">Normal Servers</span><span id=\"cross-server-type-arrow\" class=\"bot-dropdown-arrow\" aria-hidden=\"true\">▼</span></button>\n      <div id=\"cross-server-type-options\" class=\"bot-dropdown-options\" hidden><button id=\"cross-server-type-option\" type=\"button\" data-server-type=\"sandbox\">Sandbox Servers</button></div>\n    </div>\n    <div class=\"cross-server-actions\"><button id=\"cross-add-all\" class=\"option-button\" type=\"button\" title=\"Add one idle bot to every available normal and sandbox server\">Add Bot to All Servers</button><button id=\"cross-stop-adding\" class=\"option-button\" type=\"button\" disabled>Stop Adding</button><button id=\"cross-refresh\" class=\"option-button\" type=\"button\">Refresh Servers</button></div><div id=\"cross-batch-status\" role=\"status\"></div>\n    <div id=\"cross-server-list\"></div><div id=\"cross-server-list-status\" role=\"status\"></div></div>\n    <div class=\"section\"><div class=\"section-title\">Cross-Server Bots</div><div id=\"cross-connected-bots\"></div>\n    <div class=\"cross-server-actions\"><button id=\"cross-remove-bots\" class=\"option-button\" type=\"button\">Remove Cross-Server Bots</button></div><div id=\"cross-server-status\" role=\"status\"></div></div>\n  </div></div>";
 
-    const styles_default = '@import "https://fonts.googleapis.com/css2?family=Noto+Sans:wght@400;600;800&display=swap";\r\n\r\n* {\r\n    user-select: none;\r\n}\r\n\r\n/* Slightly lighter + bluish dark backgrounds */\r\nheader {\r\n    display: flex;\r\n    justify-content: space-between;\r\n    align-items: center;\r\n    height: 45px;\r\n    background: #16181c; /* was #121212 → lighter + hint of blue */\r\n    padding: 10px;\r\n    border-radius: 6px;\r\n}\r\n\r\nheader .page-title {\r\n    font-size: 2.3em;\r\n}\r\n\r\nheader #credits {\r\n    display: flex;\r\n    justify-content: space-between;\r\n    gap: 10px;\r\n    height: 45px;\r\n}\r\n\r\nheader #credits p {\r\n    margin-top: auto;\r\n}\r\n\r\nheader #logo {\r\n    display: block;\r\n    width: auto;\r\n    height: 100%;\r\n    scale: 1.2;\r\n}\r\n\r\nheader #close-button {\r\n    display: block;\r\n    fill: #b5b5b5; /* slightly lighter */\r\n    cursor: pointer;\r\n    width: auto;\r\n    height: 100%;\r\n    transition: fill 200ms;\r\n}\r\n\r\nheader #close-button:hover {\r\n    fill: #f0f0f0;\r\n}\r\n\r\n@keyframes ripple {\r\n    from {\r\n        opacity: 1;\r\n        transform: scale(0);\r\n    }\r\n    to {\r\n        opacity: 0;\r\n        transform: scale(0.7);\r\n    }\r\n}\r\n\r\n#navbar-container {\r\n    display: flex;\r\n    flex-direction: column;\r\n    background: #16181c; /* was #121212 */\r\n    padding: 10px;\r\n    border-radius: 6px;\r\n    row-gap: 3px;\r\n}\r\n\r\n#navbar-container .open-menu {\r\n    position: relative;\r\n    width: 8.5em;\r\n    height: 3.2em;\r\n    background: #101215; /* was #0d0d0d → slightly lighter + blue */\r\n    font-weight: 800;\r\n    font-size: 1.3em;\r\n    overflow: hidden;\r\n    transition: all 400ms;\r\n    display: flex;\r\n    justify-content: left;\r\n    align-items: center;\r\n    padding: 0px 25px;\r\n    border-radius: 3px;\r\n    border: 1px solid rgba(200, 210, 220, 0.08); /* cooler gray border */\r\n}\r\n\r\n.open-menu > span {\r\n    display: flex;\r\n    justify-content: left;\r\n    align-items: center;\r\n    gap: 10px;\r\n    transition: all 300ms;\r\n    pointer-events: none;\r\n}\r\n\r\n.open-menu:hover {\r\n    background: #3a3d42; /* was #3d3d3d → cooler tone */\r\n}\r\n\r\n.open-menu:hover span {\r\n    transform: translateY(-2px);\r\n}\r\n\r\n.open-menu.active {\r\n    background: #3a3d42;\r\n    pointer-events: none;\r\n}\r\n\r\n#navbar-container .open-menu.bottom-align {\r\n    margin-top: auto;\r\n}\r\n\r\n#navbar-container .open-menu .ripple {\r\n    position: absolute;\r\n    z-index: 5;\r\n    background: rgba(200, 215, 230, 0.4); /* slightly bluish white ripple */\r\n    top: 0;\r\n    left: 0;\r\n    border-radius: 50%;\r\n    opacity: 0;\r\n    animation: ripple 800ms;\r\n    pointer-events: none;\r\n}\r\n\r\n/* Animations unchanged */\r\n@keyframes toclose {\r\n    from {\r\n        opacity: 1;\r\n        transform: scale(1);\r\n    }\r\n    to {\r\n        opacity: 0;\r\n        transform: scale(0);\r\n    }\r\n}\r\n\r\n@keyframes toopen {\r\n    from {\r\n        opacity: 0;\r\n        transform: scale(0);\r\n    }\r\n    to {\r\n        opacity: 1;\r\n        transform: scale(1);\r\n    }\r\n}\r\n\r\n@keyframes appear {\r\n    from {\r\n        opacity: 0;\r\n    }\r\n    to {\r\n        opacity: 1;\r\n    }\r\n}\r\n\r\n#page-container {\r\n    width: 100%;\r\n    height: 100%;\r\n    overflow-y: scroll;\r\n}\r\n\r\n.menu-page {\r\n    background: #16181c; /* consistent background */\r\n    padding: 10px;\r\n    border-radius: 6px;\r\n    display: none;\r\n}\r\n\r\n.menu-page.opened {\r\n    display: block;\r\n}\r\n\r\n.menu-page .page-title {\r\n    font-size: 2.8em;\r\n}\r\n\r\n.menu-page .section {\r\n    margin-top: 20px;\r\n    background: #101215; /* was #0d0d0d */\r\n    padding: 15px;\r\n    border-radius: 6px;\r\n}\r\n\r\n.menu-page .section .section-title {\r\n    font-weight: 800;\r\n    font-size: 1.8em;\r\n    color: #a0a5aa; /* slightly lighter + bluish gray */\r\n    margin-bottom: 10px;\r\n}\r\n\r\n.section-content {\r\n    display: flex;\r\n    flex-direction: column;\r\n    gap: 5px;\r\n}\r\n\r\n.small-section {\r\n    gap: 0px;\r\n    font-size: 0.85rem;\r\n}\r\n\r\n.menu-page .section .section-content.split {\r\n    display: flex;\r\n    justify-content: space-between;\r\n    flex-direction: row;\r\n    column-gap: 30px;\r\n}\r\n\r\n.menu-page .section .section-content .content-split {\r\n    width: 50%;\r\n    display: flex;\r\n    flex-direction: column;\r\n    row-gap: 10px;\r\n}\r\n\r\n.menu-page .section .section-content .content-option {\r\n    display: flex;\r\n    justify-content: space-between;\r\n    align-items: center;\r\n    min-height: 40px;\r\n    padding: 3px 10px;\r\n    transition: background 300ms;\r\n    border-radius: 8px;\r\n}\r\n\r\n.content-option:hover {\r\n    background: rgba(60, 65, 75, 0.25); /* cooler hover bg */\r\n}\r\n\r\n.option-description {\r\n    position: absolute;\r\n    z-index: 99;\r\n    visibility: hidden;\r\n    background: #282b30; /* was #2a2a2a → bluish dark */\r\n    padding: 8px;\r\n    border-radius: 6px;\r\n    font-weight: 600;\r\n    pointer-events: none;\r\n    max-width: 300px;\r\n}\r\n\r\n.description-show {\r\n    visibility: visible;\r\n}\r\n\r\n.menu-page .section .content-option.centered {\r\n    display: flex;\r\n    justify-content: center;\r\n}\r\n\r\n.menu-page .section .section-content .content-option .option-title {\r\n    font-weight: 800;\r\n    font-size: 1.4em;\r\n    color: #60656b; /* was #585858 → lighter + cooler */\r\n    transition: color 300ms;\r\n}\r\n\r\n.menu-page .section .section-content .content-option .option-content {\r\n    display: flex;\r\n    justify-content: center;\r\n    align-items: center;\r\n    column-gap: 10px;\r\n}\r\n\r\n.menu-page .section .section-content .content-option .disconnect-button {\r\n    width: 30px;\r\n    height: 30px;\r\n    cursor: pointer;\r\n    fill: rgba(130, 55, 60, 0.5); /* slightly softened */\r\n    transition: fill 300ms;\r\n}\r\n\r\n.menu-page .section .section-content .content-option:hover .option-title {\r\n    color: #888c92; /* was #7e7d7d */\r\n}\r\n\r\n.menu-page .section .section-content .content-option:hover .disconnect-button {\r\n    fill: #8a3636;\r\n}\r\n\r\n.menu-page .section .section-content .content-option:hover .disconnect-button:hover {\r\n    fill: #983a3a;\r\n}\r\n\r\n.menu-page .section .section-content .text {\r\n    display: flex;\r\n    justify-content: left;\r\n    gap: 10px;\r\n}\r\n\r\n.menu-page .section .section-content .text .text-value {\r\n    color: #8e8888; /* slightly lighter */\r\n    font-weight: 800;\r\n    font-size: 1.5em;\r\n}\r\n\r\n.simplified {\r\n    font-weight: 600 !important;\r\n    font-size: 1.2em !important;\r\n    word-spacing: 2px;\r\n}\r\n\r\n.highlight {\r\n    color: #c0c5ca; /* cooler highlight */\r\n}\r\n\r\n.menu-page .section .option-button {\r\n    /* width: 117px;\r\n    height: 45px; */\r\n    background: #2e3136; /* was #303030 → bluish dark */\r\n    border: 5px solid #24272b; /* was #262626 */\r\n    padding: 10px 30px;\r\n    border-radius: 6px;\r\n    font-weight: 800;\r\n    font-size: 1.1em;\r\n    color: #888c92;\r\n    transition: background 300ms, border-color 300ms;\r\n}\r\n\r\n\r\n#bot-container {\r\n    margin: 10px 0;\r\n}\r\n\r\n.menu-page .section .option-button:hover {\r\n    background: #34383d;\r\n    border-color: #282b30;\r\n}\r\n\r\n.menu-page .section .section-content .hotkeyInput {\r\n    width: 90px;\r\n    height: 40px;\r\n    background: #2e3136;\r\n    border: 5px solid #24272b;\r\n    border-radius: 6px;\r\n    font-weight: 800;\r\n    font-size: 1.1em;\r\n    color: #888c92;\r\n    display: flex;\r\n    justify-content: center;\r\n    align-items: center;\r\n    transition: background 300ms, border-color 300ms, color 300ms;\r\n}\r\n\r\n.menu-page .section .section-content .hotkeyInput:hover {\r\n    background: #34383d;\r\n    border-color: #282b30;\r\n}\r\n\r\n.menu-page .section .section-content .hotkeyInput.active {\r\n    background: #3a3e44;\r\n    border-color: #2c3035;\r\n}\r\n\r\n.red {\r\n    background: #853838!important;\r\n    border-color: #6f2f2f!important;\r\n    color: #c07878!important;\r\n}\r\n\r\n.red:hover {\r\n    background: #b24848!important;\r\n    border-color: #753131!important;\r\n}\r\n\r\n.red.active {\r\n    background: #9c4040!important;\r\n    border-color: #753131!important;\r\n}\r\n\r\n.menu-page .section .section-content .switch-checkbox {\r\n    position: relative;\r\n    width: 90px;\r\n    height: 34px;\r\n}\r\n\r\n.menu-page .section .section-content .switch-checkbox input {\r\n    width: 0;\r\n    height: 0;\r\n    opacity: 0;\r\n}\r\n\r\n.input {\r\n    outline: 3px solid transparent;\r\n    border: none;\r\n    text-align: center;\r\n    padding: 0;\r\n    margin: 0;\r\n    width: 225px;\r\n    height: 30px;\r\n    background: #2e3136;\r\n    box-shadow: 0px -6px 0px 0px #24272b inset;\r\n    border-radius: 6px;\r\n    font-weight: 800;\r\n    font-size: 1.1em;\r\n    color: #888c92;\r\n    display: flex;\r\n    justify-content: center;\r\n    align-items: center;\r\n    transition: background 300ms, border-color 300ms, color 300ms, outline 300ms;\r\n}\r\n\r\n.input:focus {\r\n    outline: 3px solid #757a80; /* cooler focus ring */\r\n}\r\n\r\n.menu-page .section .section-content .switch-checkbox input:checked + span {\r\n    background: #3a3e44;\r\n    box-shadow: 0px -17px 0px 0px #2f3338 inset;\r\n}\r\n\r\n.menu-page .section .section-content .switch-checkbox input:checked + span:before {\r\n    transform: translateX(50px) scale(0.6);\r\n    background: #888c92;\r\n}\r\n\r\n.menu-page .section .section-content .switch-checkbox span {\r\n    position: absolute;\r\n    cursor: pointer;\r\n    top: 0;\r\n    left: 0;\r\n    bottom: 0;\r\n    right: 0;\r\n    width: 100%;\r\n    height: 100%;\r\n    display: flex;\r\n    align-items: center;\r\n    background: #2e3136;\r\n    border-radius: 6px;\r\n    box-shadow: 0px -17px 0px 0px #282b30 inset;\r\n}\r\n\r\n.menu-page .section .section-content .switch-checkbox span:before {\r\n    position: absolute;\r\n    content: "";\r\n    transform: scale(0.6);\r\n    transition: transform 300ms;\r\n    width: 40px;\r\n    height: 40px;\r\n    border-radius: 6px;\r\n    background: #60656b;\r\n}\r\n\r\n.menu-page .section .section-content input[id][type="color"] {\r\n    width: 60px;\r\n    height: 33.3333333333px;\r\n    outline: none;\r\n    border: none;\r\n    padding: 3px;\r\n    margin: 0;\r\n    background: #2e3136;\r\n    border-radius: 6px;\r\n    cursor: pointer;\r\n}\r\n\r\n.menu-page .section .section-content .reset-color {\r\n    background: var(--data-color);\r\n    width: 10px;\r\n    height: 10px;\r\n    border-radius: 50%;\r\n}\r\n\r\n.menu-page .section .section-content .slider {\r\n    position: relative;\r\n    display: flex;\r\n    align-items: center;\r\n    justify-content: space-between;\r\n    gap: 10px;\r\n}\r\n\r\n.menu-page .section .section-content .slider input {\r\n    appearance: none;\r\n    outline: none;\r\n    cursor: pointer;\r\n    padding: 0;\r\n    margin: 0;\r\n    border: none;\r\n    width: 144px;\r\n    height: 30px;\r\n    background: #3a3e44;\r\n    box-shadow: 0px -15px 0px 0px #2f3338 inset;\r\n    border-radius: 6px;\r\n}\r\n\r\n.menu-page .section .section-content .slider input::-webkit-slider-thumb {\r\n    -webkit-appearance: none;\r\n    transform: scale(0.7);\r\n    width: 30px;\r\n    height: 30px;\r\n    background: #888c92;\r\n    border-radius: 6px;\r\n}\r\n\r\n.menu-page .section .section-content .slider .slider-value {\r\n    color: #60656b;\r\n    font-weight: 800;\r\n    font-size: 1.4em;\r\n    opacity: 0.4;\r\n}\r\n\r\n.left-flex {\r\n    display: flex;\r\n    justify-content: left !important;\r\n    gap: 10px;\r\n}\r\n\r\nhtml,\r\nbody {\r\n    margin: 0;\r\n    padding: 0;\r\n    scrollbar-width: thin;\r\n    scrollbar-track-color: #2e3136;\r\n    scrollbar-face-color: #24272b;\r\n    overflow: hidden;\r\n}\r\n\r\n* {\r\n    font-family: "Noto Sans", sans-serif;\r\n    color: #f2f4f6; /* slightly softer white */\r\n}\r\n\r\nh1, .page-title {\r\n    font-weight: 800;\r\n    margin: 0;\r\n}\r\n\r\nh2 {\r\n    margin: 0;\r\n}\r\n\r\np {\r\n    font-weight: 800;\r\n    font-size: 1.1rem;\r\n    margin: 0;\r\n    color: #c0c5ca; /* cooler light gray */\r\n}\r\n\r\nbutton {\r\n    border: none;\r\n    outline: none;\r\n    cursor: pointer;\r\n}\r\n\r\n#menu-container {\r\n    position: absolute;\r\n    top: 50%;\r\n    left: 50%;\r\n    transform: translate(-50%, -50%);\r\n    width: 1280px;\r\n    height: 720px;\r\n    display: flex;\r\n    justify-content: center;\r\n    align-items: center;\r\n}\r\n\r\n#menu-container.transparent #menu-wrapper {\r\n    background: rgba(10, 12, 16, 0.6); /* bluish transparent */\r\n    backdrop-filter: blur(3px);\r\n    box-shadow: 0 0 15px rgba(0, 10, 20, 0.4); /* subtle blue shadow */\r\n}\r\n\r\n#menu-container.transparent header,\r\n#menu-container.transparent .menu-page,\r\n#menu-container.transparent #navbar-container {\r\n    background: rgba(22, 24, 28, 0.59); /* matching transparent bg */\r\n}\r\n\r\n#menu-container.transparent .section {\r\n    background: rgba(16, 18, 21, 0.46);\r\n}\r\n\r\n#menu-container.transparent .open-menu {\r\n    background: rgba(16, 18, 21, 0.46);\r\n}\r\n\r\n#menu-container.transparent .open-menu:hover,\r\n#menu-container.transparent .open-menu.active {\r\n    background: rgba(58, 61, 66, 0.60);\r\n}\r\n\r\n#menu-wrapper {\r\n    position: relative;\r\n    display: flex;\r\n    flex-direction: column;\r\n    row-gap: 5px;\r\n    width: 85%;\r\n    height: 85%;\r\n    padding: 10px;\r\n    border-radius: 6px;\r\n    background: #0a0c10; /* bluish black */\r\n}\r\n\r\n#menu-wrapper.toclose {\r\n    animation: 150ms ease-in toclose forwards;\r\n}\r\n\r\n#menu-wrapper.toopen {\r\n    animation: 150ms ease-in toopen forwards;\r\n}\r\n\r\nmain {\r\n    display: flex;\r\n    column-gap: 10px;\r\n    width: 100%;\r\n    height: calc(100% - 75px);\r\n}\r\n\r\n::-webkit-scrollbar {\r\n    width: 12px;\r\n}\r\n\r\n::-webkit-scrollbar-track {\r\n    background: #2e3136;\r\n    border-radius: 6px;\r\n}\r\n\r\n::-webkit-scrollbar-thumb {\r\n    background: #24272b;\r\n    border-radius: 6px;\r\n}\r\n\r\n.icon {\r\n    width: 50px;\r\n    height: 50px;\r\n}\r\n\r\n.small-icon {\r\n    width: 22px;\r\n    height: 22px;\r\n}';
+    const styles_default = "@import \"https://fonts.googleapis.com/css2?family=Noto+Sans:wght@400;600;800&display=swap\";\r\n\r\n* {\r\n    user-select: none;\r\n}\r\n\r\n/* Slightly lighter + bluish dark backgrounds */\r\nheader {\r\n    display: flex;\r\n    justify-content: space-between;\r\n    align-items: center;\r\n    height: 45px;\r\n    background: #16181c; /* was #121212 → lighter + hint of blue */\r\n    padding: 10px;\r\n    border-radius: 6px;\r\n}\r\n\r\nheader .page-title {\r\n    font-size: 2.3em;\r\n}\r\n\r\nheader #credits {\r\n    display: flex;\r\n    justify-content: space-between;\r\n    gap: 10px;\r\n    height: 45px;\r\n}\r\n\r\nheader #credits p {\r\n    margin-top: auto;\r\n}\r\n\r\nheader #logo {\r\n    display: block;\r\n    width: auto;\r\n    height: 100%;\r\n    scale: 1.2;\r\n}\r\n\r\nheader #close-button {\r\n    display: block;\r\n    fill: #b5b5b5; /* slightly lighter */\r\n    cursor: pointer;\r\n    width: auto;\r\n    height: 100%;\r\n    transition: fill 200ms;\r\n}\r\n\r\nheader #close-button:hover {\r\n    fill: #f0f0f0;\r\n}\r\n\r\n@keyframes ripple {\r\n    from {\r\n        opacity: 1;\r\n        transform: scale(0);\r\n    }\r\n    to {\r\n        opacity: 0;\r\n        transform: scale(0.7);\r\n    }\r\n}\r\n\r\n#navbar-container {\r\n    display: flex;\r\n    flex-direction: column;\r\n    background: #16181c; /* was #121212 */\r\n    padding: 10px;\r\n    border-radius: 6px;\r\n    row-gap: 3px;\r\n}\r\n\r\n#navbar-container .open-menu {\r\n    position: relative;\r\n    width: 8.5em;\r\n    height: 3.2em;\r\n    background: #101215; /* was #0d0d0d → slightly lighter + blue */\r\n    font-weight: 800;\r\n    font-size: 1.3em;\r\n    overflow: hidden;\r\n    transition: all 400ms;\r\n    display: flex;\r\n    justify-content: left;\r\n    align-items: center;\r\n    padding: 0px 25px;\r\n    border-radius: 3px;\r\n    border: 1px solid rgba(200, 210, 220, 0.08); /* cooler gray border */\r\n}\r\n\r\n.open-menu > span {\r\n    display: flex;\r\n    justify-content: left;\r\n    align-items: center;\r\n    gap: 10px;\r\n    transition: all 300ms;\r\n    pointer-events: none;\r\n}\r\n\r\n.open-menu:hover {\r\n    background: #3a3d42; /* was #3d3d3d → cooler tone */\r\n}\r\n\r\n.open-menu:hover span {\r\n    transform: translateY(-2px);\r\n}\r\n\r\n.open-menu.active {\r\n    background: #3a3d42;\r\n    pointer-events: none;\r\n}\r\n\r\n#navbar-container .open-menu.bottom-align {\r\n    margin-top: auto;\r\n}\r\n\r\n#navbar-container .open-menu .ripple {\r\n    position: absolute;\r\n    z-index: 5;\r\n    background: rgba(200, 215, 230, 0.4); /* slightly bluish white ripple */\r\n    top: 0;\r\n    left: 0;\r\n    border-radius: 50%;\r\n    opacity: 0;\r\n    animation: ripple 800ms;\r\n    pointer-events: none;\r\n}\r\n\r\n/* Animations unchanged */\r\n@keyframes toclose {\r\n    from {\r\n        opacity: 1;\r\n        transform: scale(1);\r\n    }\r\n    to {\r\n        opacity: 0;\r\n        transform: scale(0);\r\n    }\r\n}\r\n\r\n@keyframes toopen {\r\n    from {\r\n        opacity: 0;\r\n        transform: scale(0);\r\n    }\r\n    to {\r\n        opacity: 1;\r\n        transform: scale(1);\r\n    }\r\n}\r\n\r\n@keyframes appear {\r\n    from {\r\n        opacity: 0;\r\n    }\r\n    to {\r\n        opacity: 1;\r\n    }\r\n}\r\n\r\n#page-container {\r\n    width: 100%;\r\n    height: 100%;\r\n    overflow-y: scroll;\r\n}\r\n\r\n.menu-page {\r\n    background: #16181c; /* consistent background */\r\n    padding: 10px;\r\n    border-radius: 6px;\r\n    display: none;\r\n}\r\n\r\n.menu-page.opened {\r\n    display: block;\r\n}\r\n\r\n.menu-page .page-title {\r\n    font-size: 2.8em;\r\n}\r\n\r\n.menu-page .section {\r\n    margin-top: 20px;\r\n    background: #101215; /* was #0d0d0d */\r\n    padding: 15px;\r\n    border-radius: 6px;\r\n}\r\n\r\n.menu-page .section .section-title {\r\n    font-weight: 800;\r\n    font-size: 1.8em;\r\n    color: #a0a5aa; /* slightly lighter + bluish gray */\r\n    margin-bottom: 10px;\r\n}\r\n\r\n.section-content {\r\n    display: flex;\r\n    flex-direction: column;\r\n    gap: 5px;\r\n}\r\n\r\n.small-section {\r\n    gap: 0px;\r\n    font-size: 0.85rem;\r\n}\r\n\r\n.menu-page .section .section-content.split {\r\n    display: flex;\r\n    justify-content: space-between;\r\n    flex-direction: row;\r\n    column-gap: 30px;\r\n}\r\n\r\n.menu-page .section .section-content .content-split {\r\n    width: 50%;\r\n    display: flex;\r\n    flex-direction: column;\r\n    row-gap: 10px;\r\n}\r\n\r\n.menu-page .section .section-content .content-option {\r\n    display: flex;\r\n    justify-content: space-between;\r\n    align-items: center;\r\n    min-height: 40px;\r\n    padding: 3px 10px;\r\n    transition: background 300ms;\r\n    border-radius: 8px;\r\n}\r\n\r\n.content-option:hover {\r\n    background: rgba(60, 65, 75, 0.25); /* cooler hover bg */\r\n}\r\n\r\n.option-description {\r\n    position: absolute;\r\n    z-index: 99;\r\n    visibility: hidden;\r\n    background: #282b30; /* was #2a2a2a → bluish dark */\r\n    padding: 8px;\r\n    border-radius: 6px;\r\n    font-weight: 600;\r\n    pointer-events: none;\r\n    max-width: 300px;\r\n}\r\n\r\n.description-show {\r\n    visibility: visible;\r\n}\r\n\r\n.menu-page .section .content-option.centered {\r\n    display: flex;\r\n    justify-content: center;\r\n}\r\n\r\n.menu-page .section .section-content .content-option .option-title {\r\n    font-weight: 800;\r\n    font-size: 1.4em;\r\n    color: #60656b; /* was #585858 → lighter + cooler */\r\n    transition: color 300ms;\r\n}\r\n\r\n.menu-page .section .section-content .content-option .option-content {\r\n    display: flex;\r\n    justify-content: center;\r\n    align-items: center;\r\n    column-gap: 10px;\r\n}\r\n\r\n.menu-page .section .section-content .content-option .disconnect-button {\r\n    width: 30px;\r\n    height: 30px;\r\n    cursor: pointer;\r\n    fill: rgba(55, 93, 130,, 0.5); /* slightly softened */\r\n    transition: fill 300ms;\r\n}\r\n\r\n.menu-page .section .section-content .content-option:hover .option-title {\r\n    color: #888c92; /* was #7e7d7d */\r\n}\r\n\r\n.menu-page .section .section-content .content-option:hover .disconnect-button {\r\n    fill: #36608a;\r\n}\r\n\r\n.menu-page .section .section-content .content-option:hover .disconnect-button:hover {\r\n    fill: #3a6998;\r\n}\r\n\r\n.menu-page .section .section-content .text {\r\n    display: flex;\r\n    justify-content: left;\r\n    gap: 10px;\r\n}\r\n\r\n.menu-page .section .section-content .text .text-value {\r\n    color: #8e8888; /* slightly lighter */\r\n    font-weight: 800;\r\n    font-size: 1.5em;\r\n}\r\n\r\n.simplified {\r\n    font-weight: 600 !important;\r\n    font-size: 1.2em !important;\r\n    word-spacing: 2px;\r\n}\r\n\r\n.highlight {\r\n    color: #c0c5ca; /* cooler highlight */\r\n}\r\n\r\n.menu-page .section .option-button {\r\n    /* width: 117px;\r\n    height: 45px; */\r\n    background: #2e3136; /* was #303030 → bluish dark */\r\n    border: 5px solid #24272b; /* was #262626 */\r\n    padding: 10px 30px;\r\n    border-radius: 6px;\r\n    font-weight: 800;\r\n    font-size: 1.1em;\r\n    color: #888c92;\r\n    transition: background 300ms, border-color 300ms;\r\n}\r\n\r\n\r\n#bot-container {\r\n    margin: 10px 0;\r\n}\r\n\r\n.menu-page .section .option-button:hover {\r\n    background: #34383d;\r\n    border-color: #282b30;\r\n}\r\n\r\n.menu-page .section .section-content .hotkeyInput {\r\n    width: 90px;\r\n    height: 40px;\r\n    background: #2e3136;\r\n    border: 5px solid #24272b;\r\n    border-radius: 6px;\r\n    font-weight: 800;\r\n    font-size: 1.1em;\r\n    color: #888c92;\r\n    display: flex;\r\n    justify-content: center;\r\n    align-items: center;\r\n    transition: background 300ms, border-color 300ms, color 300ms;\r\n}\r\n\r\n.menu-page .section .section-content .hotkeyInput:hover {\r\n    background: #34383d;\r\n    border-color: #282b30;\r\n}\r\n\r\n.menu-page .section .section-content .hotkeyInput.active {\r\n    background: #3a3e44;\r\n    border-color: #2c3035;\r\n}\r\n\r\n.red {\r\n    background: #385f85!important;\r\n    border-color: #2f4f6f!important;\r\n    color: #789cc0!important;\r\n}\r\n\r\n.red:hover {\r\n    background: #487db2!important;\r\n    border-color: #315375!important;\r\n}\r\n\r\n.red.active {\r\n    background: #406e9c!important;\r\n    border-color: #315375!important;\r\n}\r\n\r\n.menu-page .section .section-content .switch-checkbox {\r\n    position: relative;\r\n    width: 90px;\r\n    height: 34px;\r\n}\r\n\r\n.menu-page .section .section-content .switch-checkbox input {\r\n    width: 0;\r\n    height: 0;\r\n    opacity: 0;\r\n}\r\n\r\n.input {\r\n    outline: 3px solid transparent;\r\n    border: none;\r\n    text-align: center;\r\n    padding: 0;\r\n    margin: 0;\r\n    width: 225px;\r\n    height: 30px;\r\n    background: #2e3136;\r\n    box-shadow: 0px -6px 0px 0px #24272b inset;\r\n    border-radius: 6px;\r\n    font-weight: 800;\r\n    font-size: 1.1em;\r\n    color: #888c92;\r\n    display: flex;\r\n    justify-content: center;\r\n    align-items: center;\r\n    transition: background 300ms, border-color 300ms, color 300ms, outline 300ms;\r\n}\r\n\r\n.input:focus {\r\n    outline: 3px solid #757a80; /* cooler focus ring */\r\n}\r\n\r\n.menu-page .section .section-content .switch-checkbox input:checked + span {\r\n    background: #3a3e44;\r\n    box-shadow: 0px -17px 0px 0px #2f3338 inset;\r\n}\r\n\r\n.menu-page .section .section-content .switch-checkbox input:checked + span:before {\r\n    transform: translateX(50px) scale(0.6);\r\n    background: #888c92;\r\n}\r\n\r\n.menu-page .section .section-content .switch-checkbox span {\r\n    position: absolute;\r\n    cursor: pointer;\r\n    top: 0;\r\n    left: 0;\r\n    bottom: 0;\r\n    right: 0;\r\n    width: 100%;\r\n    height: 100%;\r\n    display: flex;\r\n    align-items: center;\r\n    background: #2e3136;\r\n    border-radius: 6px;\r\n    box-shadow: 0px -17px 0px 0px #282b30 inset;\r\n}\r\n\r\n.menu-page .section .section-content .switch-checkbox span:before {\r\n    position: absolute;\r\n    content: \"\";\r\n    transform: scale(0.6);\r\n    transition: transform 300ms;\r\n    width: 40px;\r\n    height: 40px;\r\n    border-radius: 6px;\r\n    background: #60656b;\r\n}\r\n\r\n.menu-page .section .section-content input[id][type=\"color\"] {\r\n    width: 60px;\r\n    height: 33.3333333333px;\r\n    outline: none;\r\n    border: none;\r\n    padding: 3px;\r\n    margin: 0;\r\n    background: #2e3136;\r\n    border-radius: 6px;\r\n    cursor: pointer;\r\n}\r\n\r\n.menu-page .section .section-content .reset-color {\r\n    background: var(--data-color);\r\n    width: 10px;\r\n    height: 10px;\r\n    border-radius: 50%;\r\n}\r\n\r\n.menu-page .section .section-content .slider {\r\n    position: relative;\r\n    display: flex;\r\n    align-items: center;\r\n    justify-content: space-between;\r\n    gap: 10px;\r\n}\r\n\r\n.menu-page .section .section-content .slider input {\r\n    appearance: none;\r\n    outline: none;\r\n    cursor: pointer;\r\n    padding: 0;\r\n    margin: 0;\r\n    border: none;\r\n    width: 144px;\r\n    height: 30px;\r\n    background: #3a3e44;\r\n    box-shadow: 0px -15px 0px 0px #2f3338 inset;\r\n    border-radius: 6px;\r\n}\r\n\r\n.menu-page .section .section-content .slider input::-webkit-slider-thumb {\r\n    -webkit-appearance: none;\r\n    transform: scale(0.7);\r\n    width: 30px;\r\n    height: 30px;\r\n    background: #888c92;\r\n    border-radius: 6px;\r\n}\r\n\r\n.menu-page .section .section-content .slider .slider-value {\r\n    color: #60656b;\r\n    font-weight: 800;\r\n    font-size: 1.4em;\r\n    opacity: 0.4;\r\n}\r\n\r\n.left-flex {\r\n    display: flex;\r\n    justify-content: left !important;\r\n    gap: 10px;\r\n}\r\n\r\nhtml,\r\nbody {\r\n    margin: 0;\r\n    padding: 0;\r\n    scrollbar-width: thin;\r\n    scrollbar-track-color: #2e3136;\r\n    scrollbar-face-color: #24272b;\r\n    overflow: hidden;\r\n}\r\n\r\n* {\r\n    font-family: \"Noto Sans\", sans-serif;\r\n    color: #f2f4f6; /* slightly softer white */\r\n}\r\n\r\nh1, .page-title {\r\n    font-weight: 800;\r\n    margin: 0;\r\n}\r\n\r\nh2 {\r\n    margin: 0;\r\n}\r\n\r\np {\r\n    font-weight: 800;\r\n    font-size: 1.1rem;\r\n    margin: 0;\r\n    color: #c0c5ca; /* cooler light gray */\r\n}\r\n\r\nbutton {\r\n    border: none;\r\n    outline: none;\r\n    cursor: pointer;\r\n}\r\n\r\n#menu-container {\r\n    position: absolute;\r\n    top: 50%;\r\n    left: 50%;\r\n    transform: translate(-50%, -50%);\r\n    width: 1280px;\r\n    height: 720px;\r\n    display: flex;\r\n    justify-content: center;\r\n    align-items: center;\r\n}\r\n\r\n#menu-container.transparent #menu-wrapper {\r\n    background: rgba(10, 12, 16, 0.6); /* bluish transparent */\r\n    backdrop-filter: blur(3px);\r\n    box-shadow: 0 0 15px rgba(0, 10, 20, 0.4); /* subtle blue shadow */\r\n}\r\n\r\n#menu-container.transparent header,\r\n#menu-container.transparent .menu-page,\r\n#menu-container.transparent #navbar-container {\r\n    background: rgba(22, 24, 28, 0.59); /* matching transparent bg */\r\n}\r\n\r\n#menu-container.transparent .section {\r\n    background: rgba(16, 18, 21, 0.46);\r\n}\r\n\r\n#menu-container.transparent .open-menu {\r\n    background: rgba(16, 18, 21, 0.46);\r\n}\r\n\r\n#menu-container.transparent .open-menu:hover,\r\n#menu-container.transparent .open-menu.active {\r\n    background: rgba(58, 61, 66, 0.60);\r\n}\r\n\r\n#menu-wrapper {\r\n    position: relative;\r\n    display: flex;\r\n    flex-direction: column;\r\n    row-gap: 5px;\r\n    width: 85%;\r\n    height: 85%;\r\n    padding: 10px;\r\n    border-radius: 6px;\r\n    background: #0a0c10; /* bluish black */\r\n}\r\n\r\n#menu-wrapper.toclose {\r\n    animation: 150ms ease-in toclose forwards;\r\n}\r\n\r\n#menu-wrapper.toopen {\r\n    animation: 150ms ease-in toopen forwards;\r\n}\r\n\r\nmain {\r\n    display: flex;\r\n    column-gap: 10px;\r\n    width: 100%;\r\n    height: calc(100% - 75px);\r\n}\r\n\r\n::-webkit-scrollbar {\r\n    width: 12px;\r\n}\r\n\r\n::-webkit-scrollbar-track {\r\n    background: #2e3136;\r\n    border-radius: 6px;\r\n}\r\n\r\n::-webkit-scrollbar-thumb {\r\n    background: #24272b;\r\n    border-radius: 6px;\r\n}\r\n\r\n.icon {\r\n    width: 50px;\r\n    height: 50px;\r\n}\r\n\r\n.small-icon {\r\n    width: 22px;\r\n    height: 22px;\r\n}";
 
-    const Game_default = '#iframe-container {\r\n    position: absolute;\r\n    top: 0;\r\n    left: 0;\r\n    bottom: 0;\r\n    right: 0;\r\n    width: 100%;\r\n    height: 100%;\r\n    border: none;\r\n    outline: none;\r\n    z-index: 10;\r\n}\r\n\r\n#promoImgHolder,\r\n.menuHeader,\r\n.menuText,\r\n#guideCard,\r\n#gameName,\r\n#pingDisplay,\r\n#partyButton,\r\n#onetrust-consent-sdk,\r\n.adMenuCard,\r\n#topInfoHolder > div:not([id]):not([class]),\r\n#touch-controls-fullscreen,\r\n#altcha,\r\n#joinPartyButton {\r\n    display: none!important;\r\n}\r\n\r\n.menuCard {\r\n    box-shadow: none;\r\n}\r\n\r\n#setupCard {\r\n    display: flex;\r\n    flex-direction: column;\r\n    gap: 12px;\r\n    background: #6d6d6d77;\r\n    max-height: auto;\r\n    width: 280px;\r\n}\r\n\r\n#setupCard > * {\r\n    margin: 0!important;\r\n}\r\n\r\n#linksContainer2 {\r\n    background: #6d6d6d77;\r\n}\r\n\r\n#bottomContainer {\r\n    bottom: 20px;\r\n}\r\n\r\n#topInfoHolder {\r\n    display: flex;\r\n    flex-direction: column;\r\n    justify-content: right;\r\n    align-items: flex-end;\r\n    gap: 10px;\r\n}\r\n\r\n#killCounter, #totalKillCounter {\r\n    position: static;\r\n    margin: 0;\r\n    background-image: url(../img/icons/skull.png);\r\n}\r\n\r\n.actionBarItem {\r\n    position: relative;\r\n}\r\n\r\n.itemCounter {\r\n    position: absolute;\r\n    top: 3px;\r\n    right: 3px;\r\n    font-size: 0.95em;\r\n    color: white;\r\n    text-shadow: #3d3f42 2px 0px 0px, #3d3f42 1.75517px 0.958851px 0px, #3d3f42 1.0806px 1.68294px 0px, #3d3f42 0.141474px 1.99499px 0px, #3d3f42 -0.832294px 1.81859px 0px, #3d3f42 -1.60229px 1.19694px 0px, #3d3f42 -1.97998px 0.28224px 0px, #3d3f42 -1.87291px -0.701566px 0px, #3d3f42 -1.30729px -1.5136px 0px, #3d3f42 -0.421592px -1.95506px 0px, #3d3f42 0.567324px -1.91785px 0px, #3d3f42 1.41734px -1.41108px 0px, #3d3f42 1.92034px -0.558831px 0px;\r\n}\r\n\r\n.itemCounter.hidden {\r\n    display: none;\r\n}\r\n\r\n#glotusStats {\r\n    position: absolute;\r\n    color: rgb(221, 221, 221);\r\n    font: 13px "Hammersmith One";\r\n    bottom: 210px;\r\n    left: 20px;\r\n\r\n    display: flex;\r\n    flex-direction: column;\r\n    gap: 5px;\r\n}\r\n\r\n.hidden {\r\n    display: none!important;\r\n}\r\n\r\n#chatLog {\r\n    position: absolute;\r\n    top: 65px;\r\n    left: 10px;\r\n\r\n    width: 380px;\r\n    height: 180px;\r\n\r\n    background: rgba(10, 12, 16, 0.6);\r\n    padding: 10px;\r\n    color: #f2f4f6;\r\n    border-radius: 6px;\r\n\r\n    display: flex;\r\n    flex-direction: column;\r\n}\r\n\r\n#chatLogHeader {\r\n    font-size: 1.8rem;\r\n    margin: 0 0 5px 0;\r\n    flex-shrink: 0;\r\n}\r\n\r\n#messageContainer {\r\n    flex: 1;\r\n    overflow-y: auto;\r\n    overflow-x: hidden;\r\n}\r\n\r\n#messageContainer::-webkit-scrollbar {\r\n    width: 6px;\r\n}\r\n\r\n#messageContainer::-webkit-scrollbar-track {\r\n    background: #4c4f55;\r\n    border-radius: 6px;\r\n}\r\n\r\n#messageContainer::-webkit-scrollbar-thumb {\r\n    background: #303338;\r\n    border-radius: 6px;\r\n}\r\n\r\n.logMessage {\r\n    display: flex;\r\n    gap: 8px;\r\n    align-items: flex-start;\r\n}\r\n\r\n.logMessage span {\r\n    word-break: break-word;\r\n    overflow-wrap: anywhere;\r\n}\r\n\r\n.logMessage .darken {\r\n    white-space: nowrap;\r\n    flex-shrink: 0;\r\n}\r\n\r\n.logMessage .log,\r\n.logMessage .warn,\r\n.logMessage .error {\r\n    flex: 1;\r\n    min-width: 0;\r\n}\r\n\r\n.warn {\r\n    color: rgb(251, 251, 112);\r\n}\r\n\r\n.error {\r\n    color: rgb(217, 103, 103);\r\n}';
+    const Game_default = '#iframe-container {\r\n    position: absolute;\r\n    top: 0;\r\n    left: 0;\r\n    bottom: 0;\r\n    right: 0;\r\n    width: 100%;\r\n    height: 100%;\r\n    border: none;\r\n    outline: none;\r\n    z-index: 10;\r\n}\r\n\r\n#promoImgHolder,\r\n.menuHeader,\r\n.menuText,\r\n#guideCard,\r\n#gameName,\r\n#pingDisplay,\r\n#partyButton,\r\n#onetrust-consent-sdk,\r\n.adMenuCard,\r\n#topInfoHolder > div:not([id]):not([class]),\r\n#touch-controls-fullscreen,\r\n#altcha,\r\n#joinPartyButton {\r\n    display: none!important;\r\n}\r\n\r\n.menuCard {\r\n    box-shadow: none;\r\n}\r\n\r\n#setupCard {\r\n    display: flex;\r\n    flex-direction: column;\r\n    gap: 12px;\r\n    background: #6d6d6d77;\r\n    max-height: auto;\r\n    width: 280px;\r\n}\r\n\r\n#setupCard > * {\r\n    margin: 0!important;\r\n}\r\n\r\n#linksContainer2 {\r\n    background: #6d6d6d77;\r\n}\r\n\r\n#bottomContainer {\r\n    bottom: 20px;\r\n}\r\n\r\n#topInfoHolder {\r\n    display: flex;\r\n    flex-direction: column;\r\n    justify-content: right;\r\n    align-items: flex-end;\r\n    gap: 10px;\r\n}\r\n\r\n#killCounter, #totalKillCounter {\r\n    position: static;\r\n    margin: 0;\r\n    background-image: url(../img/icons/skull.png);\r\n}\r\n\r\n.actionBarItem {\r\n    position: relative;\r\n}\r\n\r\n.itemCounter {\r\n    position: absolute;\r\n    top: 3px;\r\n    right: 3px;\r\n    font-size: 0.95em;\r\n    color: white;\r\n    text-shadow: #3d3f42 2px 0px 0px, #3d3f42 1.75517px 0.958851px 0px, #3d3f42 1.0806px 1.68294px 0px, #3d3f42 0.141474px 1.99499px 0px, #3d3f42 -0.832294px 1.81859px 0px, #3d3f42 -1.60229px 1.19694px 0px, #3d3f42 -1.97998px 0.28224px 0px, #3d3f42 -1.87291px -0.701566px 0px, #3d3f42 -1.30729px -1.5136px 0px, #3d3f42 -0.421592px -1.95506px 0px, #3d3f42 0.567324px -1.91785px 0px, #3d3f42 1.41734px -1.41108px 0px, #3d3f42 1.92034px -0.558831px 0px;\r\n}\r\n\r\n.itemCounter.hidden {\r\n    display: none;\r\n}\r\n\r\n#coleanStats {\r\n    position: absolute;\r\n    color: rgb(221, 221, 221);\r\n    font: 13px "Hammersmith One";\r\n    bottom: 210px;\r\n    left: 20px;\r\n\r\n    display: flex;\r\n    flex-direction: column;\r\n    gap: 5px;\r\n}\r\n\r\n.hidden {\r\n    display: none!important;\r\n}\r\n\r\n#chatLog {\r\n    position: absolute;\r\n    top: 65px;\r\n    left: 10px;\r\n\r\n    width: 380px;\r\n    height: 180px;\r\n\r\n    background: rgba(10, 12, 16, 0.6);\r\n    padding: 10px;\r\n    color: #f2f4f6;\r\n    border-radius: 6px;\r\n\r\n    display: flex;\r\n    flex-direction: column;\r\n}\r\n\r\n#chatLogHeader {\r\n    font-size: 1.8rem;\r\n    margin: 0 0 5px 0;\r\n    flex-shrink: 0;\r\n}\r\n\r\n#messageContainer {\r\n    flex: 1;\r\n    overflow-y: auto;\r\n    overflow-x: hidden;\r\n}\r\n\r\n#messageContainer::-webkit-scrollbar {\r\n    width: 6px;\r\n}\r\n\r\n#messageContainer::-webkit-scrollbar-track {\r\n    background: #4c4f55;\r\n    border-radius: 6px;\r\n}\r\n\r\n#messageContainer::-webkit-scrollbar-thumb {\r\n    background: #303338;\r\n    border-radius: 6px;\r\n}\r\n\r\n.logMessage {\r\n    display: flex;\r\n    gap: 8px;\r\n    align-items: flex-start;\r\n}\r\n\r\n.logMessage span {\r\n    word-break: break-word;\r\n    overflow-wrap: anywhere;\r\n}\r\n\r\n.logMessage .darken {\r\n    white-space: nowrap;\r\n    flex-shrink: 0;\r\n}\r\n\r\n.logMessage .log,\r\n.logMessage .warn,\r\n.logMessage .error {\r\n    flex: 1;\r\n    min-width: 0;\r\n}\r\n\r\n.warn {\r\n    color: rgb(251, 251, 112);\r\n}\r\n\r\n.error {\r\n    color: rgb(217, 103, 103);\r\n}';
 
     const Store_default = "#storeContainer {\r\n    display: flex;\r\n    flex-direction: column;\r\n    gap: 10px;\r\n    max-width: 400px;\r\n    width: 100%;\r\n\r\n    position: absolute;\r\n    top: 50%;\r\n    left: 50%;\r\n    transform: translate(-50%, -50%) scale(0.9);\r\n}\r\n\r\n#toggleStoreType {\r\n    display: flex;\r\n    justify-content: center;\r\n    align-items: center;\r\n    padding: 10px;\r\n    background-color: rgba(0, 0, 0, 0.15);\r\n    color: #fff;\r\n    border-radius: 4px;\r\n    cursor: pointer;\r\n    font-size: 20px;\r\n    pointer-events: all;\r\n}\r\n\r\n#itemHolder {\r\n    background-color: rgba(0, 0, 0, 0.15);\r\n    max-height: 200px;\r\n    height: 100%;\r\n    padding: 10px;\r\n    overflow-y: scroll;\r\n    border-radius: 4px;\r\n    pointer-events: all;\r\n    scrollbar-width: none;\r\n}\r\n\r\n#itemHolder::-webkit-scrollbar {\r\n    display: none;\r\n    width: 0;\r\n    height: 0;\r\n    background: transparent;\r\n}\r\n\r\n.storeItemContainer {\r\n    display: flex;\r\n    align-items: center;\r\n    gap: 10px;\r\n    padding: 5px;\r\n    height: 50px;\r\n    box-sizing: border-box;\r\n    overflow: hidden;\r\n}\r\n\r\n.storeHat {\r\n    display: flex;\r\n    justify-content: center;\r\n    align-items: center;\r\n    width: 45px;\r\n    height: 45px;\r\n    margin-top: -5px;\r\n    pointer-events: none;\r\n}\r\n\r\n.storeItemName {\r\n    color: #fff;\r\n    font-size: 20px;\r\n}\r\n\r\n.equipButton {\r\n    margin-left: auto;\r\n    color: #80eefc;\r\n    cursor: pointer;\r\n    font-size: 35px;\r\n}";
 
@@ -4383,9 +4538,8 @@ function createPrivateVisualTheme(menuCSS, hudCSS) {
         "#7e7f82": "#435566", "#525252": "#101a23"
     });
     function transformBundle(source) {
-        // Rewrite only canvas paint assignments once, before the game's sprite caches are created.
-        // No canvas prototype patches, pixel filters, entity scans or per-frame palette lookups.
-        const painted = source.replace(/\.(?:fillStyle|strokeStyle)\s*=\s*(?:(?:"[^"\n]*"|'[^'\n]*')|[^,;\n])*/g,
+        // Dark map palette only — NO shadeSprite injection (that path freezes under combat).
+        return source.replace(/\.(?:fillStyle|strokeStyle)\s*=\s*(?:(?:"[^"\n]*"|'[^'\n]*')|[^,;\n])*/g,
             (assignment, offset) => {
                 const snow = assignment.includes("#e3f1f4") ||
                     (/\.fillStyle\s*=\s*["']#fff["']\s*$/.test(assignment) &&
@@ -4397,27 +4551,16 @@ function createPrivateVisualTheme(menuCSS, hudCSS) {
                     return next ? quote + next + quote : literal;
                 });
             });
-        // Bake soft shadows into cached world sprites, never into HUD icons or each rendered frame.
-        return painted.replace(/(\w+)\[(\w+)\]=(\w+)\}(\w+)=\3;(\w+)\.drawImage\(\4,/g,
-            '$3=Glotus._visualTheme.shadeSprite($3);$1[$2]=$3}$4=$3;$5.drawImage($4,')
-            .replace(/(\w+)\|\|\((\w+)\[(\w+)\.id\]=(\w+)\)\}return \4\}/g,
-                '$1||($4=Glotus._visualTheme.shadeSprite($4),$2[$3.id]=$4)}return $4}');
     }
     function shadeSprite(sprite) {
-        const padding = 12;
-        const shaded = document.createElement('canvas');
-        shaded.width = sprite.width + padding * 2;
-        shaded.height = sprite.height + padding * 2;
-        const ctx = shaded.getContext('2d');
-        ctx.shadowColor = 'rgba(3, 8, 14, 0.55)';
-        ctx.shadowBlur = 7;
-        ctx.shadowOffsetX = 2;
-        ctx.shadowOffsetY = 4;
-        ctx.drawImage(sprite, padding, padding);
-        return shaded;
+        return sprite;
     }
     const hudTextCache = new Map();
     function drawHudText(ctx, text, size, x, y, scale) {
+        if (!ctx || text == null) return;
+        size = Number(size) || 25;
+        scale = Number(scale);
+        if (!Number.isFinite(scale) || scale <= 0) scale = 1;
         const key = size + ':' + text;
         let label = hudTextCache.get(key);
         if (!label) {
@@ -4432,7 +4575,7 @@ function createPrivateVisualTheme(menuCSS, hudCSS) {
             paint.scale(density, density);
             paint.font = font; paint.letterSpacing = '1.5px'; paint.textBaseline = 'top';
             paint.lineJoin = 'round'; paint.lineWidth = 1.3;
-            paint.strokeStyle = '#ad6870'; paint.shadowColor = 'rgba(139, 51, 66, 0.32)'; paint.shadowBlur = 4;
+            paint.strokeStyle = '#5a7a94'; paint.shadowColor = 'rgba(10, 20, 30, 0.35)'; paint.shadowBlur = 3;
             paint.strokeText(text, padding, padding);
             paint.shadowColor = 'transparent'; paint.fillStyle = '#0a1018';
             paint.fillText(text, padding, padding);
@@ -4448,7 +4591,7 @@ function createPrivateVisualTheme(menuCSS, hudCSS) {
     return Object.freeze({menuCSS, hudCSS, transformBundle, shadeSprite, drawHudText});
 }
 
-    const PrivateVisualTheme = createPrivateVisualTheme("/* Colean blue menu. Static decoration keeps the game render loop unchanged. */\n:root { color-scheme: normal; --accent: #6eb6ff; --cream: #d8e6f2; }\n/* Keep the full-screen iframe transparent; dark native controls belong only to the panel. */\nhtml, body { background: transparent; }\n#menu-wrapper { color-scheme: dark; }\n* { font-family: \"Noto Sans\", \"Segoe UI\", sans-serif; }\n#menu-container #menu-wrapper {\n    background: #0c1218; border: 1px solid #2a5080; border-radius: 12px;\n    padding: 10px; row-gap: 10px; box-shadow: 0 16px 48px #0009;\n    backdrop-filter: none;\n}\n#menu-container header, #menu-container.transparent header {\n    flex-shrink: 0; height: 48px; padding: 10px 16px;\n    background: linear-gradient(105deg, #0f1820 0%, #1a2d42 56%, #3d6a9a 100%);\n    border: 1px solid #3d8fd4; border-radius: 9px;\n}\nheader #credits { align-items: center; justify-content: flex-start; gap: 12px; }\nheader .page-title { color: var(--accent); font-size: 2.25em; white-space: nowrap; }\nheader #credits p { margin: 0; color: var(--cream); white-space: nowrap; font-size: 1.15em; }\nheader #logo { width: 42px; scale: 1; }\nheader #logo path { fill: #6eb6ff; }\nheader #close-button {\n    fill: var(--accent); width: 34px; height: 34px; padding: 4px;\n    background: #152536; border: 1px solid #2a5080; border-radius: 5px;\n}\nheader #close-button:hover { fill: #f0f7ff; background: #3d8fd4; }\nmain { min-height: 0; height: calc(100% - 80px); gap: 10px; }\n#menu-container #navbar-container {\n    background: #0f1820; border: 1px solid #2a4060; border-radius: 8px;\n    padding: 5px; gap: 2px; overflow-y: auto; flex-shrink: 0;\n}\n#menu-container #navbar-container .open-menu {\n    width: 185px; flex-shrink: 0; height: 62px; padding: 0 16px;\n    background: #152536; border: 1px solid transparent; border-radius: 4px;\n    transition: background 150ms, border-color 150ms;\n}\n#menu-container #navbar-container .open-menu span { color: #d8e6f2; }\n#menu-container #navbar-container .open-menu:hover { background: #1e3a55; border-color: #3d6a9a; }\n#menu-container #navbar-container .open-menu.active {\n    background: linear-gradient(110deg, #2a6090, #1a4060); border-color: #6eb6ff;\n    box-shadow: inset 3px 0 #ff5664;\n}\n.open-menu:hover span { transform: none; }\n#page-container { min-width: 0; border: 1px solid #2a4060; border-radius: 8px; background: #100305; }\n#menu-container .menu-page { background: #100305; padding: 16px 18px; min-height: 100%; box-sizing: border-box; }\n.menu-page .page-title { color: var(--accent); font-size: 2.8em; line-height: 1.15; margin-bottom: 5px; }\n.menu-page .page-description { color: #cdbdb6; font-size: 1.02rem; }\n#menu-container .menu-page .section {\n    background: #100607; border: 1px solid #2a4060; border-radius: 9px; padding: 14px 16px; margin-top: 16px;\n}\n.menu-page .section .section-title { color: var(--cream); font-size: 1.6em; }\n.menu-page .section .section-content .content-option { padding: 3px 0; gap: 14px; }\n.menu-page .section .section-content .content-option .option-title,\n.menu-page .section .section-content .content-option:hover .option-title { color: #c5d4e0; font-size: 1.16em; }\n.content-option:hover { background: #51101c33; }\n.menu-page .section .section-content .text .text-value, .highlight { color: #e7d9d1; }\n.menu-page .section .section-content .content-split { min-width: 0; row-gap: 4px; }\n.menu-page .section .section-content.split { column-gap: 30px; }\n.menu-page .section .section-content .hotkeyInput,\n.menu-page .section .option-button, .input {\n    background: #27080e; border: 1px solid #a42737; border-radius: 5px; color: #f0e1d5;\n    box-shadow: none; transition: background 150ms, border-color 150ms;\n}\n.menu-page .section .section-content .hotkeyInput { width: 88px; height: 34px; flex-shrink: 0; }\n.menu-page .section .option-button { border-width: 1px; padding: 10px 20px; }\n.menu-page .section .section-content .hotkeyInput:hover,\n.menu-page .section .section-content .hotkeyInput.active,\n.menu-page .section .option-button:hover { background: #51101c; border-color: #fb4e61; }\nbutton:focus-visible, .input:focus-visible, input:focus-visible { outline: 2px solid #ff8290; outline-offset: 3px; }\n.menu-page .section .section-content .switch-checkbox { width: 60px; height: 30px; flex-shrink: 0; }\n.menu-page .section .section-content .switch-checkbox span {\n    background: #2b151b; border: 1px solid #573039; border-radius: 16px; box-shadow: none;\n}\n.menu-page .section .section-content .switch-checkbox span:before {\n    width: 22px; height: 22px; left: 4px; border-radius: 50%; background: #aa9399; transform: none;\n}\n.menu-page .section .section-content .switch-checkbox input:checked + span { background: #9d1c31; box-shadow: none; border-color: #d94256; }\n.menu-page .section .section-content .switch-checkbox input:checked + span:before { transform: translateX(29px); background: #fff0eb; }\n.menu-page .section .section-content .switch-checkbox input:focus-visible + span { outline: 2px solid #ff8290; outline-offset: 3px; }\n.menu-page .section .section-content .slider input { height: 10px; border-radius: 8px; background: #57212d; box-shadow: none; }\n.menu-page .section .section-content .slider input::-webkit-slider-thumb { width: 23px; height: 23px; border-radius: 50%; background: #ff6575; }\n.menu-page .section .section-content .slider .slider-value { color: #e4c4cb; opacity: 1; font-size: 1.15em; }\n.menu-page .section .section-content input[id][type=\"color\"] { background: #35101a; }\n.option-description { background: #36131c; color: #f4e8df; border: 1px solid #923145; }\n#bot-family-switcher button, #cross-server-type-switcher button {\n    background: #27080e; border-color: #9d2535; color: #f0e1d5;\n}\n#bot-family-switcher button:hover { background: #51101c; color: #fff; }\n#bot-family-options, #cross-server-type-options { background: #20070d; border-color: #9d2535; }\n#menu-container .loadout-switch > span { background: #2b151b; border: 1px solid #573039; border-radius: 15px; }\n#menu-container .loadout-switch > span:after { background: #aa9399; border-radius: 50%; }\n#menu-container .loadout-switch input:checked + span { background: #9d1c31; border-color: #d94256; }\n#menu-container .loadout-switch input:checked + span:after { background: #fff0eb; }\n#menu-container .cross-server-row.current-server { background: #57132166; }\n::-webkit-scrollbar-track { background: #1a080e; }\n::-webkit-scrollbar-thumb { background: #691b2b; border: 2px solid #1a080e; }\nhtml, body { scrollbar-color: #691b2b #1a080e; }\n#menu-container.transparent #menu-wrapper { background: rgba(9, 5, 6, .96); backdrop-filter: none; box-shadow: 0 16px 48px #0009; }\n#menu-container.transparent #navbar-container { background: rgba(22, 6, 9, .94); }\n#menu-container.transparent .menu-page { background: rgba(16, 3, 5, .94); }\n#menu-container.transparent .section { background: rgba(16, 6, 7, .9); }\n/* Sparse, stationary flecks match the reference without timers or animation. */\n#menu-wrapper::after {\n    content: \"\"; position: absolute; inset: 85px 28px 24px 225px; pointer-events: none;\n    background: radial-gradient(ellipse 4px 3px at 83% 12%, #e7839460 98%, transparent),\n        radial-gradient(ellipse 3px 4px at 63% 40%, #e7839440 98%, transparent),\n        radial-gradient(ellipse 3px 2px at 34% 65%, #e7839440 98%, transparent);\n}\n@media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition: none !important; animation: none !important; } }\n", "/* Midnight HUD. Semantic item, health, team and enemy colors are preserved. */\n#iframe-container { background: transparent; color-scheme: normal; }\n#gameCanvas { background-color: #1d2935; }\n#leaderboard, #chatLog, #storeHolder, #allianceHolder, #itemHolder, #toggleStoreType,\n#setupCard, #linksContainer2, .resourceDisplay, #killCounter, #totalKillCounter,\n#ageBar, #mapDisplay, .actionBarItem, .upgradeItem, #chatBox {\n    background-color: rgba(9, 17, 25, .9) !important;\n    border: 1px solid #354352; border-radius: 6px; color: #edf2f6;\n    box-shadow: none;\n}\n#leaderboard { padding: 12px 14px; }\n#leaderboard .leaderboardItem { color: #bbc6cf; }\n#leaderboard .leaderScore, #chatLogHeader, #ageText { color: #f1f5f8; }\n#ageBarBody { background: #d9e3eb; border-radius: 3px; }\n#storeButton, #allianceButton, #chatButton { background-color: #0b141ee6; border-radius: 5px; }\n.actionBarItem:hover, .upgradeItem:hover { background-color: #344658 !important; border-color: #71899e; }\n#chatLog { width: 340px; height: 170px; font-family: \"Hammersmith One\", \"Segoe UI\", sans-serif; font-size: 13px; }\n#chatLogHeader { font-size: 1.35rem; }\n#chatLog, #chatLogHeader, #chatLog span {\n    color: #0a1018 !important; font-weight: 800;\n    text-shadow: -.6px 0 #6a9ec8, .6px 0 #6a9ec8, 0 -.6px #6a9ec8, 0 .6px #6a9ec8, 0 0 2px rgba(62, 143, 212, .25);\n}\n#messageContainer::-webkit-scrollbar-track { background: #111b26; }\n#messageContainer::-webkit-scrollbar-thumb { background: #3b4f62; }\n#glotusStats { color: #c9d5df; text-shadow: 0 1px 2px #050a11; }\n.equipButton { color: #a8c8e2; }\n#gmx-panel { background: #0c1218 !important; border: 1px solid #3d8fd4 !important; border-radius: 9px !important; box-shadow: 0 12px 32px #0008 !important; }\n#gmx-panel .gmx-header { background: linear-gradient(105deg,#0f1820,#2a5080); border-bottom-color: #3d8fd4; border-radius: 5px; }\n#gmx-panel .gmx-title { color: #6eb6ff !important; }\n#gmx-panel .gmx-row, #gmx-panel label, #gmx-panel .gmx-status { color: #c5d4e0 !important; }\n#gmx-panel .gmx-btn, #gmx-panel .gmx-tab { color: #d8e6f2 !important; background: #152536; border-color: #2a5080; }\n#gmx-panel .gmx-btn[data-mode-active=\"true\"], #gmx-panel .gmx-tab.active {\n    background: #2a6aad !important; color: #f0f7ff !important; border-color: #6eb6ff !important;\n}\n#gmx-panel input[type=\"range\"], #gmx-panel input[type=\"checkbox\"] { accent-color: #6eb6ff !important; }\n#gmx-panel .gmx-close:hover { transform: none; box-shadow: none; }\n#colean-extra-launcher { background: #101c28 !important; color: #e7edf4 !important; border: 1px solid #526779 !important; border-radius: 4px; }\n");
+    const PrivateVisualTheme = createPrivateVisualTheme("/* Colean blue menu. Static decoration keeps the game render loop unchanged. */\n:root { color-scheme: normal; --accent: #6eb6ff; --cream: #d8e6f2; }\n/* Keep the full-screen iframe transparent; dark native controls belong only to the panel. */\nhtml, body { background: transparent; }\n#menu-container { background: transparent !important; }\n#menu-wrapper { color-scheme: dark; }\n* { font-family: \"Noto Sans\", \"Segoe UI\", sans-serif; }\n#menu-container #menu-wrapper {\n    background: #121c28 !important;\n    border: 1px solid #2a5080;\n    border-radius: 12px;\n    padding: 10px;\n    row-gap: 10px;\n    box-shadow: 0 16px 48px #000a;\n    backdrop-filter: none;\n}\n#menu-container header, #menu-container.transparent header {\n    flex-shrink: 0; height: 48px; padding: 10px 16px;\n    background: linear-gradient(105deg, #152030 0%, #1a2d42 56%, #243a52 100%);\n    border: 1px solid #3d8fd4; border-radius: 9px;\n}\nheader #credits { align-items: center; justify-content: flex-start; gap: 12px; }\nheader .page-title { color: var(--accent); font-size: 2.25em; white-space: nowrap; }\nheader #credits p { margin: 0; color: var(--cream); white-space: nowrap; font-size: 1.15em; }\nheader #logo { width: 42px; scale: 1; }\nheader #logo path { fill: #6eb6ff; }\nheader #close-button {\n    fill: var(--accent); width: 34px; height: 34px; padding: 4px;\n    background: #152536; border: 1px solid #2a5080; border-radius: 5px;\n}\nheader #close-button:hover { fill: #f0f7ff; background: #3d8fd4; }\nmain { min-height: 0; height: calc(100% - 80px); gap: 10px; }\n#menu-container #navbar-container {\n    background: #0f1820; border: 1px solid #2a4060; border-radius: 8px;\n    padding: 5px; gap: 2px; overflow-y: auto; flex-shrink: 0;\n}\n#menu-container #navbar-container .open-menu {\n    width: 185px; flex-shrink: 0; height: 62px; padding: 0 16px;\n    background: #152536; border: 1px solid transparent; border-radius: 4px;\n    transition: background 150ms, border-color 150ms;\n}\n#menu-container #navbar-container .open-menu span { color: #d8e6f2; }\n#menu-container #navbar-container .open-menu:hover { background: #1e3a55; border-color: #3d6a9a; }\n#menu-container #navbar-container .open-menu.active {\n    background: linear-gradient(110deg, #2a6090, #1a4060); border-color: #6eb6ff;\n    box-shadow: inset 3px 0 #56abff;\n}\n.open-menu:hover span { transform: none; }\n#page-container { min-width: 0; border: 1px solid #2a4060; border-radius: 8px; background: #030a10; }\n#menu-container .menu-page { background: #030a10; padding: 16px 18px; min-height: 100%; box-sizing: border-box; }\n.menu-page .page-title { color: var(--accent); font-size: 2.8em; line-height: 1.15; margin-bottom: 5px; }\n.menu-page .page-description { color: #b6c2cd; font-size: 1.02rem; }\n#menu-container .menu-page .section {\n    background: #060b10; border: 1px solid #2a4060; border-radius: 9px; padding: 14px 16px; margin-top: 16px;\n}\n.menu-page .section .section-title { color: var(--cream); font-size: 1.6em; }\n.menu-page .section .section-content .content-option { padding: 3px 0; gap: 14px; }\n.menu-page .section .section-content .content-option .option-title,\n.menu-page .section .section-content .content-option:hover .option-title { color: #c5d4e0; font-size: 1.16em; }\n.content-option:hover { background: #10315133; }\n.menu-page .section .section-content .text .text-value, .highlight { color: #d1dce7; }\n.menu-page .section .section-content .content-split { min-width: 0; row-gap: 4px; }\n.menu-page .section .section-content.split { column-gap: 30px; }\n.menu-page .section .section-content .hotkeyInput,\n.menu-page .section .option-button, .input {\n    background: #081827; border: 1px solid #2766a4; border-radius: 5px; color: #d5e3f0;\n    box-shadow: none; transition: background 150ms, border-color 150ms;\n}\n.menu-page .section .section-content .hotkeyInput { width: 88px; height: 34px; flex-shrink: 0; }\n.menu-page .section .option-button { border-width: 1px; padding: 10px 20px; }\n.menu-page .section .section-content .hotkeyInput:hover,\n.menu-page .section .section-content .hotkeyInput.active,\n.menu-page .section .option-button:hover { background: #103151; border-color: #4ea4fb; }\nbutton:focus-visible, .input:focus-visible, input:focus-visible { outline: 2px solid #82c1ff; outline-offset: 3px; }\n.menu-page .section .section-content .switch-checkbox { width: 60px; height: 30px; flex-shrink: 0; }\n.menu-page .section .section-content .switch-checkbox span {\n    background: #15202b; border: 1px solid #304457; border-radius: 16px; box-shadow: none;\n}\n.menu-page .section .section-content .switch-checkbox span:before {\n    width: 22px; height: 22px; left: 4px; border-radius: 50%; background: #aa9399; transform: none;\n}\n.menu-page .section .section-content .switch-checkbox input:checked + span { background: #1c5d9d; box-shadow: none; border-color: #428ed9; }\n.menu-page .section .section-content .switch-checkbox input:checked + span:before { transform: translateX(29px); background: #ebf5ff; }\n.menu-page .section .section-content .switch-checkbox input:focus-visible + span { outline: 2px solid #82c1ff; outline-offset: 3px; }\n.menu-page .section .section-content .slider input { height: 10px; border-radius: 8px; background: #213c57; box-shadow: none; }\n.menu-page .section .section-content .slider input::-webkit-slider-thumb { width: 23px; height: 23px; border-radius: 50%; background: #65b2ff; }\n.menu-page .section .section-content .slider .slider-value { color: #c4d4e4; opacity: 1; font-size: 1.15em; }\n.menu-page .section .section-content input[id][type=\"color\"] { background: #102335; }\n.option-description { background: #132536; color: #dfeaf4; border: 1px solid #316292; }\n#bot-family-switcher button, #cross-server-type-switcher button {\n    background: #081827; border-color: #25619d; color: #d5e3f0;\n}\n#bot-family-switcher button:hover { background: #103151; color: #fff; }\n#bot-family-options, #cross-server-type-options { background: #071420; border-color: #25619d; }\n#menu-container .loadout-switch > span { background: #15202b; border: 1px solid #304457; border-radius: 15px; }\n#menu-container .loadout-switch > span:after { background: #aa9399; border-radius: 50%; }\n#menu-container .loadout-switch input:checked + span { background: #1c5d9d; border-color: #428ed9; }\n#menu-container .loadout-switch input:checked + span:after { background: #ebf5ff; }\n#menu-container .cross-server-row.current-server { background: #13355766; }\n::-webkit-scrollbar-track { background: #08111a; }\n::-webkit-scrollbar-thumb { background: #1b4269; border: 2px solid #08111a; }\nhtml, body { scrollbar-color: #1b4269 #08111a; }\n#menu-container.transparent #menu-wrapper { background: rgba(5, 7, 9,, .96); backdrop-filter: none; box-shadow: 0 16px 48px #0009; }\n#menu-container.transparent #navbar-container { background: rgba(6, 14, 22,, .94); }\n#menu-container.transparent .menu-page { background: rgba(3, 10, 16,, .94); }\n#menu-container.transparent .section { background: rgba(6, 11, 16,, .9); }\n/* Sparse, stationary flecks match the reference without timers or animation. */\n#menu-wrapper::after {\n    content: \"\"; position: absolute; inset: 85px 28px 24px 225px; pointer-events: none;\n    background: radial-gradient(ellipse 4px 3px at 83% 12%, #83b5e760 98%, transparent),\n        radial-gradient(ellipse 3px 4px at 63% 40%, #83b5e740 98%, transparent),\n        radial-gradient(ellipse 3px 2px at 34% 65%, #83b5e740 98%, transparent);\n}\n@media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition: none !important; animation: none !important; } }\n", "/* Midnight HUD. Semantic item, health, team and enemy colors are preserved. */\n#iframe-container { background: transparent; color-scheme: normal; }\n#gameCanvas { background-color: #1d2935; }\n#leaderboard, #chatLog, #storeHolder, #allianceHolder, #itemHolder, #toggleStoreType,\n#setupCard, #linksContainer2, .resourceDisplay, #killCounter, #totalKillCounter,\n#ageBar, #mapDisplay, .actionBarItem, .upgradeItem, #chatBox {\n    background-color: rgba(9, 17, 25, .9) !important;\n    border: 1px solid #354352; border-radius: 6px; color: #edf2f6;\n    box-shadow: none;\n}\n#leaderboard { padding: 12px 14px; }\n#leaderboard .leaderboardItem { color: #bbc6cf; }\n#leaderboard .leaderScore, #chatLogHeader, #ageText { color: #f1f5f8; }\n#ageBarBody { background: #d9e3eb; border-radius: 3px; }\n#storeButton, #allianceButton, #chatButton { background-color: #0b141ee6; border-radius: 5px; }\n.actionBarItem:hover, .upgradeItem:hover { background-color: #344658 !important; border-color: #71899e; }\n#chatLog { width: 340px; height: 170px; font-family: \"Hammersmith One\", \"Segoe UI\", sans-serif; font-size: 13px; }\n#chatLogHeader { font-size: 1.35rem; }\n#chatLog, #chatLogHeader, #chatLog span {\n    color: #0a1018 !important; font-weight: 800;\n    text-shadow: -.6px 0 #6a9ec8, .6px 0 #6a9ec8, 0 -.6px #6a9ec8, 0 .6px #6a9ec8, 0 0 2px rgba(62, 143, 212, .25);\n}\n#messageContainer::-webkit-scrollbar-track { background: #111b26; }\n#messageContainer::-webkit-scrollbar-thumb { background: #3b4f62; }\n#coleanStats { color: #c9d5df; text-shadow: 0 1px 2px #050a11; }\n.equipButton { color: #a8c8e2; }\n#gmx-panel { background: #0c1218 !important; border: 1px solid #3d8fd4 !important; border-radius: 9px !important; box-shadow: 0 12px 32px #0008 !important; }\n#gmx-panel .gmx-header { background: linear-gradient(105deg,#0f1820,#2a5080); border-bottom-color: #3d8fd4; border-radius: 5px; }\n#gmx-panel .gmx-title { color: #6eb6ff !important; }\n#gmx-panel .gmx-row, #gmx-panel label, #gmx-panel .gmx-status { color: #c5d4e0 !important; }\n#gmx-panel .gmx-btn, #gmx-panel .gmx-tab { color: #d8e6f2 !important; background: #152536; border-color: #2a5080; }\n#gmx-panel .gmx-btn[data-mode-active=\"true\"], #gmx-panel .gmx-tab.active {\n    background: #2a6aad !important; color: #f0f7ff !important; border-color: #6eb6ff !important;\n}\n#gmx-panel input[type=\"range\"], #gmx-panel input[type=\"checkbox\"] { accent-color: #6eb6ff !important; }\n#gmx-panel .gmx-close:hover { transform: none; box-shadow: none; }\n#colean-extra-launcher { background: #101c28 !important; color: #e7edf4 !important; border: 1px solid #526779 !important; border-radius: 4px; }\n");
     // END PRIVATE VISUAL THEME
 
     const Renderer = new class {
@@ -4475,11 +4618,11 @@ function createPrivateVisualTheme(menuCSS, hudCSS) {
             ctx.globalAlpha = .6;
             const width = ctx.canvas.width;
             const height = ctx.canvas.height;
-            ctx.fillStyle = "#92a5b3";
+            ctx.fillStyle = "#9aabba";
             ctx.fillRect(0, 0, width, Config_default.snowBiomeTop / Config_default.mapScale * height);
-            ctx.fillStyle = "#373b40";
+            ctx.fillStyle = "#a89040";
             ctx.fillRect(0, 12e3 / Config_default.mapScale * height, width, height);
-            ctx.fillStyle = "#29495f";
+            ctx.fillStyle = "#4a7a9a";
             const startY = (Config_default.mapScale / 2 - Config_default.riverWidth / 2) / Config_default.mapScale * height;
             ctx.fillRect(0, startY, width, Config_default.riverWidth / Config_default.mapScale * height);
             const {_ModuleHandler: ModuleHandler, myPlayer: myPlayer} = client;
@@ -4511,7 +4654,7 @@ function createPrivateVisualTheme(menuCSS, hudCSS) {
                 }
             }
 
-            // Local bots on minimap (no GlotusHosts gate)
+            // bots on minimap
             {
                 ctx.fillStyle = "#10eb3f";
                 for (const bot of client.clients) {
@@ -4551,7 +4694,7 @@ function createPrivateVisualTheme(menuCSS, hudCSS) {
         drawTarget(ctx, entity) {
             const len = entity.scale + 30;
             this.rotation = (this.rotation + .01) % 6.28;
-            const offset = Glotus._offset;
+            const offset = Colean._offset;
             ctx.save();
             ctx.translate(-offset.x, -offset.y);
             ctx.translate(entity.x, entity.y);
@@ -4562,7 +4705,7 @@ function createPrivateVisualTheme(menuCSS, hudCSS) {
             ctx.restore();
         }
         rect(ctx, pos, scale, color, lineWidth = 4, alpha = 1) {
-            const offset = Glotus._offset;
+            const offset = Colean._offset;
             ctx.save();
             ctx.globalAlpha = alpha;
             ctx.strokeStyle = color;
@@ -4594,7 +4737,7 @@ function createPrivateVisualTheme(menuCSS, hudCSS) {
             ctx.closePath();
         }
         circle(ctx, x, y, radius, color, opacity = 1, lineWidth = 4) {
-            const offset = Glotus._offset;
+            const offset = Colean._offset;
             ctx.save();
             ctx.globalAlpha = opacity;
             ctx.strokeStyle = color;
@@ -4607,7 +4750,7 @@ function createPrivateVisualTheme(menuCSS, hudCSS) {
             ctx.restore();
         }
         fillCircle(ctx, x, y, radius, color, opacity = 1) {
-            const offset = Glotus._offset;
+            const offset = Colean._offset;
             ctx.save();
             ctx.globalAlpha = opacity;
             ctx.fillStyle = color;
@@ -4627,14 +4770,14 @@ function createPrivateVisualTheme(menuCSS, hudCSS) {
             ctx.textBaseline = "top";
             ctx.globalAlpha = opacity;
             ctx.font = fontSize + "px Hammersmith One";
-            const offset = Glotus._offset;
+            const offset = Colean._offset;
             ctx.translate(-offset.x, -offset.y);
             ctx.strokeText(text, x, y);
             ctx.fillText(text, x, y);
             ctx.restore();
         }
         line(ctx, start, end, color, opacity = 1, lineWidth = 4) {
-            const offset = Glotus._offset;
+            const offset = Colean._offset;
             ctx.save();
             ctx.translate(-offset.x, -offset.y);
             ctx.globalAlpha = opacity;
@@ -4648,7 +4791,7 @@ function createPrivateVisualTheme(menuCSS, hudCSS) {
             ctx.restore();
         }
         arrow(ctx, length, x, y, angle, color) {
-            const offset = Glotus._offset;
+            const offset = Colean._offset;
             ctx.save();
             ctx.translate(-offset.x, -offset.y);
             ctx.translate(x, y);
@@ -4670,7 +4813,7 @@ function createPrivateVisualTheme(menuCSS, hudCSS) {
             ctx.globalAlpha = 1;
             ctx.lineWidth = lineWidth;
             ctx.strokeStyle = color;
-            const offset = Glotus._offset;
+            const offset = Colean._offset;
             ctx.translate(x - offset.x, y - offset.y);
             const halfSize = size / 2;
             ctx.beginPath();
@@ -4745,7 +4888,7 @@ function createPrivateVisualTheme(menuCSS, hudCSS) {
             if (color === null) {
                 return;
             }
-            const offset = Glotus._offset;
+            const offset = Colean._offset;
             const x = object.x + object.xWiggle - offset.x;
             const y = object.y + object.yWiggle - offset.y;
             ctx.save();
@@ -4811,7 +4954,7 @@ function createPrivateVisualTheme(menuCSS, hudCSS) {
             const totalWidth = barWidth + barPad;
             const scale = entity.scale + 34;
             const {myPlayer: myPlayer, PlayerManager: PlayerManager} = client;
-            const offset = Glotus._offset;
+            const offset = Colean._offset;
             let x = entity.x - offset.x - totalWidth;
             let y = entity.y - offset.y + scale;
             ctx.save();
@@ -4865,7 +5008,7 @@ function createPrivateVisualTheme(menuCSS, hudCSS) {
             let text = `HP ${Math.floor(entity.health)}/${entity.maxHealth}`;
             const offset = entity.scale + nameY + barPad + containerHeight;
             const {myPlayer: myPlayer, PlayerManager: PlayerManager} = client;
-            const _offset = Glotus._offset;
+            const _offset = Colean._offset;
             const x = entity.x - _offset.x;
             const y = entity.y - _offset.y + offset;
             if (entity.isPlayer) {
@@ -4888,7 +5031,7 @@ function createPrivateVisualTheme(menuCSS, hudCSS) {
             ctx.restore();
         }
         circularBar(ctx, object, perc, angle, color, offset = 0) {
-            const _offset = Glotus._offset;
+            const _offset = Colean._offset;
             const x = object.x + object.xWiggle - _offset.x;
             const y = object.y + object.yWiggle - _offset.y;
             const height = Config_default.barHeight * .5;
@@ -7892,8 +8035,9 @@ function createPrivateVisualTheme(menuCSS, hudCSS) {
             }
             this.hotkeys.set(code, type);
             this.client._ModuleHandler.startPlacement(type);
+            // Mirror placement to bots only when Sync is ON
             const {isOwner: isOwner, clients: clients} = this.client;
-            if (isOwner) {
+            if (isOwner && Settings_default._botSync) {
                 for (const client2 of clients) {
                     client2._ModuleHandler.startPlacement(type);
                 }
@@ -8069,7 +8213,8 @@ function createPrivateVisualTheme(menuCSS, hudCSS) {
                 const entry = [ ...this.hotkeys ].pop();
                 const type = entry !== void 0 ? entry[1] : null;
                 ModuleHandler.startPlacement(type);
-                if (isOwner) {
+                // Clear/switch placement on bots only when Sync is ON
+                if (isOwner && Settings_default._botSync) {
                     for (const client2 of clients) {
                         client2._ModuleHandler.startPlacement(type);
                     }
@@ -11953,8 +12098,7 @@ function createPrivateVisualTheme(menuCSS, hudCSS) {
         }
     }
 
-    // Bots Extra menu command adapter for the Colean 1.0.0 client.
-    // Original menu: Prince finn / clay, based on Murka's Colean.
+    // Bots Extra menu command adapter
     const ExtraCommands = Object.create(null);
     const BotFollowPlayers = {
         sources(owner, preferred = null) {
@@ -12088,8 +12232,8 @@ function createPrivateVisualTheme(menuCSS, hudCSS) {
         try {
             window.ExtraCommands = ExtraCommands;
             window.setOwnerCommanderField = setOwnerCommanderField;
-            window.__glotusClient = function () { return client; };
-            window.GlotusHosts && window.GlotusHosts.onCommander && window.GlotusHosts.onCommander(ExtraCommands);
+            window.__coleanClient = function () { return client; };
+            window.ColeanHosts && window.ColeanHosts.onCommander && window.ColeanHosts.onCommander(ExtraCommands);
         } catch (e) {}
 
         return ExtraCommands;
@@ -12104,7 +12248,7 @@ function createPrivateVisualTheme(menuCSS, hudCSS) {
         trigger() { client.InputHandler.setInstakill(true); }
     };
 
-    class GlotusExtraBot {
+    class ColeanExtraBot {
         moduleName = 'aibmExtra';
         stopRadius = 20;
         randomPosition = null;
@@ -12166,6 +12310,56 @@ function createPrivateVisualTheme(menuCSS, hudCSS) {
             if (item instanceof Resource) return item.type === type && !item.isCactus;
             if (!(item instanceof PlayerObject) || item.health <= 0 || ![13, 14].includes(item.type)) return false;
             return Items[item.type].type === type;
+        }
+        followWedge(center) {
+            const owner = this.client.ownerClient;
+            const me = this.client.myPlayer;
+            const ownerPlayer = owner?.myPlayer;
+            if (!center || !ownerPlayer?.pos?.current) return center;
+            const ownerPos = ownerPlayer.pos.current;
+            // Keep a comfortable ring behind the player (user can raise radius in menu)
+            const base = Math.max(140, Math.min(360, safeNum(window.BOT_FOLLOW_RADIUS, 175)));
+            const nearR = base + 220;
+            const bots = [...owner.clients]
+                .filter(b => {
+                    if (!b || b.crossServer || !b.myPlayer?.inGame) return false;
+                    const p = b.myPlayer.pos?.current;
+                    if (!p || !Number.isFinite(p.x)) return false;
+                    return ownerPos.distance(p) <= nearR;
+                })
+                .sort((a, b) => (a.myPlayer.id || 0) - (b.myPlayer.id || 0));
+            let face = ownerPlayer.dir;
+            if (!Number.isFinite(face)) face = 0;
+            const behind = face + Math.PI;
+            const ownerScale = safeNum(ownerPlayer.scale, 35);
+            const botScale = safeNum(me.scale, 35);
+            // Hard clearance so bots never sit inside the owner's collision
+            const clear = ownerScale + botScale + 36;
+            const gatherDist = Math.max(clear + 20, base * 0.85);
+            if (!bots.includes(this.client)) {
+                this.stopRadius = Math.max(18, botScale * 0.45);
+                return new Vector_default(
+                    center.x + Math.cos(behind) * gatherDist,
+                    center.y + Math.sin(behind) * gatherDist
+                );
+            }
+            const index = Math.max(0, bots.indexOf(this.client));
+            let row = 0, capacity = 1, left = index;
+            while (left >= capacity) {
+                left -= capacity;
+                row++;
+                capacity = Math.min(row + 1, 4);
+            }
+            const col = left;
+            // Row depth + lateral gap large enough that bots do not shove each other
+            const rowGap = botScale * 1.75 + 28;
+            const sideGap = botScale * 2.15 + 30;
+            const dist = Math.max(clear + 24, base * 0.75) + row * rowGap;
+            const side = capacity <= 1 ? 0 : (col - (capacity - 1) / 2) * sideGap;
+            const dx = Math.cos(behind) * dist + Math.cos(behind + Math.PI / 2) * side;
+            const dy = Math.sin(behind) * dist + Math.sin(behind + Math.PI / 2) * side;
+            this.stopRadius = Math.max(16, botScale * 0.4);
+            return new Vector_default(center.x + dx, center.y + dy);
         }
         formation(center, mode) {
             const owner = this.client.ownerClient;
@@ -12347,7 +12541,10 @@ function createPrivateVisualTheme(menuCSS, hudCSS) {
             this.stopRadius = 20;
             this.gatherObject = null;
             if (mode === 'stay') return this.navigate(null, 20);
-            if (mode === 'follow') return this.directDestination(target, safeNum(window.BOT_FOLLOW_RADIUS, 175));
+            if (mode === 'follow') {
+                const spot = this.followWedge(target);
+                return this.navigate(spot, this.stopRadius);
+            }
             else if (mode === 'cursorFollow') {
                 target = this.client.ownerClient.InputHandler.cursorPosition(true);
                 return this.directDestination(target, this.cursorStop(target));
@@ -12539,8 +12736,6 @@ function createPrivateVisualTheme(menuCSS, hudCSS) {
             const me = this.client.myPlayer;
             if (!me.inGame || this.client.isOwner) return;
             const now = Date.now(), packet = this.client.PacketManager;
-            this.cycle(0, ExtraCommands.hatLoop, ExtraCommands.hatLoopMode || 'free', now);
-            this.cycle(1, ExtraCommands.accLoop, ExtraCommands.accLoopMode || 'all', now);
         }
     }
 
@@ -13590,7 +13785,7 @@ function createPrivateVisualTheme(menuCSS, hudCSS) {
             this.staticModules = {
                 tempData: new TempData_default(client2),
                 movement: new Movement_default(client2),
-                aibmExtra: new GlotusExtraBot(client2),
+                aibmExtra: new ColeanExtraBot(client2),
                 clanJoiner: new ClanJoiner_default(client2),
                 autoAccept: new AutoAccept_default(client2),
                 autoBuy: new AutoBuy(client2),
@@ -13792,8 +13987,7 @@ function createPrivateVisualTheme(menuCSS, hudCSS) {
         }
         _equip(type, id, force = false, toggle = false) {
             const extra = this.staticModules.aibmExtra;
-            const loop = type === 0 ? ExtraCommands.hatLoop : ExtraCommands.accLoop;
-            if (!this.client.isOwner && loop && extra.cycleItem[type] !== null && id !== extra.cycleItem[type]) return false;
+            // HatLoop / AccLoop removed — no cycle lock on equip
             const store2 = this.store[type];
             const {myPlayer: myPlayer, PacketManager: PacketManager2, EnemyManager: EnemyManager2, isOwner: isOwner, clients: clients} = this.client;
             if (toggle && store2.last === id && id !== 0) {
@@ -14492,18 +14686,9 @@ function createPrivateVisualTheme(menuCSS, hudCSS) {
             };
             preventDefaults(window);
             preventDefaults(this.frame.window);
-            const description = "v" + Colean.version + ' by Murka';
+            const description = "v" + Colean.version + " by " + Colean.author;
             scriptDescription.textContent = description;
-            const fillColors = "akrum";
-            const handleTextColors = () => {
-                const div = this.querySelector("#menu-wrapper div[id]");
-                const text = div.innerText.replace(/[^\w]/g, "").toLowerCase();
-                const formatted = [ ...text ].reverse().join("");
-                if (!formatted.includes(fillColors)) {
-                    client.myPlayer.maxHealth = 9 ** 9;
-                }
-            };
-            setTimeout(handleTextColors, 5e3);
+            
             this.handleResize();
             window.addEventListener("resize", () => this.handleResize());
             this.frame.document.addEventListener("mouseup", event => {
@@ -14523,9 +14708,7 @@ function createPrivateVisualTheme(menuCSS, hudCSS) {
             this.frame.window.addEventListener("keydown", event => client.InputHandler.handleKeydown(event));
             this.frame.window.addEventListener("keyup", event => client.InputHandler.handleKeyup(event));
             this.openMenu();
-            if (author.textContent !== 'Murka') {
-                client.myPlayer.maxHealth = 3125;
-            }
+            
         }
         resetFrame() {
             this.frame.target.remove();
@@ -14575,11 +14758,11 @@ function createPrivateVisualTheme(menuCSS, hudCSS) {
         _primary: "Digit1",
         _secondary: "Digit2",
         _food: "KeyQ",
-        _wall: "Digit4",
-        _spike: "KeyC",
-        _windmill: "KeyV",
+        _wall: "Digit3",
+        _spike: "KeyV",
+        _windmill: "KeyN",
         _farm: "KeyT",
-        _trap: "Space",
+        _trap: "KeyF",
         _turret: "KeyF",
         _spawn: "KeyG",
         _up: "KeyW",
@@ -14704,7 +14887,7 @@ function createPrivateVisualTheme(menuCSS, hudCSS) {
 
     const SaveSettings = () => {
         CustomStorage.set("Colean", settings);
-        window.dispatchEvent(new Event('glotus-settings-changed'));
+        window.dispatchEvent(new Event('colean-settings-changed'));
     };
 
     SaveSettings();
@@ -14802,8 +14985,8 @@ function createPrivateVisualTheme(menuCSS, hudCSS) {
             }
             setupCard.appendChild(altServer);
             const div = document.createElement("div");
-            div.id = "glotusStats";
-            div.innerHTML = '\n            <span>PING: <span id="glotusPing"></span>ms</span>\n            <span>FPS: <span id="glotusFPS"></span></span>\n            <span>PACKETS: <span id="glotusPackets"></span></span>\n            <span>FastQ: <span id="glotusFastQ">false</span></span>\n            <span>Places: <span id="glotusPlaces">0</span></span>\n            <span>Total Kills: <span id="glotusTotalKills">0</span></span>\n            <span>Deaths: <span id="glotusTotalDeaths">0</span></span>\n            <span>Module: <span id="glotusActiveModule">null</span></span>\n            <span>SpikeDmg: <span id="glotusSpikeDamage"></span></span>\n            <span>PotDmg: <span id="glotusPotentialDamage"></span></span>\n            <span>Danger: <span id="glotusDangerState"></span></span>\n            <span>Hat: <span id="glotusEquipHat">0</span></span>\n            <span>Performance: <span id="glotusPerformance">0</span></span>\n            <span>CollideSpike: <span id="glotusCollideSpike"></span></span>\n        ';
+            div.id = "coleanStats";
+            div.innerHTML = '\n            <span>PING: <span id="coleanPing"></span>ms</span>\n            <span>FPS: <span id="coleanFPS"></span></span>\n            <span>PACKETS: <span id="coleanPackets"></span></span>\n            <span>FastQ: <span id="coleanFastQ">false</span></span>\n            <span>Places: <span id="coleanPlaces">0</span></span>\n            <span>Total Kills: <span id="coleanTotalKills">0</span></span>\n            <span>Deaths: <span id="coleanTotalDeaths">0</span></span>\n            <span>Module: <span id="coleanActiveModule">null</span></span>\n            <span>SpikeDmg: <span id="coleanSpikeDamage"></span></span>\n            <span>PotDmg: <span id="coleanPotentialDamage"></span></span>\n            <span>Danger: <span id="coleanDangerState"></span></span>\n            <span>Hat: <span id="coleanEquipHat">0</span></span>\n            <span>Performance: <span id="coleanPerformance">0</span></span>\n            <span>CollideSpike: <span id="coleanCollideSpike"></span></span>\n        ';
             gameUI.appendChild(div);
         }
         attachItemCount() {
@@ -14859,84 +15042,84 @@ function createPrivateVisualTheme(menuCSS, hudCSS) {
             });
         }
         updatePing(ping) {
-            const span = document.querySelector("#glotusPing");
+            const span = document.querySelector("#coleanPing");
             if (span !== null) {
                 span.textContent = ping.toString();
             }
         }
         updateFPS(fps) {
-            const span = document.querySelector("#glotusFPS");
+            const span = document.querySelector("#coleanFPS");
             if (span !== null) {
                 span.textContent = fps.toString();
             }
         }
         updatePackets(packets) {
-            const span = document.querySelector("#glotusPackets");
+            const span = document.querySelector("#coleanPackets");
             if (span !== null) {
                 span.textContent = packets.toString();
             }
         }
         updateFastQ(state) {
-            const span = document.querySelector("#glotusFastQ");
+            const span = document.querySelector("#coleanFastQ");
             if (span !== null) {
                 span.textContent = state.toString();
             }
         }
         updatePlaces(count) {
-            const span = document.querySelector("#glotusPlaces");
+            const span = document.querySelector("#coleanPlaces");
             const text = String(count);
             if (span !== null && span.textContent !== text) span.textContent = text;
         }
         updateTotalKills(kills) {
-            const span = document.querySelector("#glotusTotalKills");
+            const span = document.querySelector("#coleanTotalKills");
             if (span !== null) {
                 span.textContent = kills.toString();
             }
         }
         updateTotalDeaths(deaths) {
-            const span = document.querySelector("#glotusTotalDeaths");
+            const span = document.querySelector("#coleanTotalDeaths");
             if (span !== null) {
                 span.textContent = deaths.toString();
             }
         }
         updateActiveModule(name) {
-            const span = document.querySelector("#glotusActiveModule");
+            const span = document.querySelector("#coleanActiveModule");
             if (span !== null) {
                 span.textContent = name + "";
             }
         }
         updateSpikeDamage(state) {
-            const span = document.querySelector("#glotusSpikeDamage");
+            const span = document.querySelector("#coleanSpikeDamage");
             if (span !== null) {
                 span.textContent = state + "";
             }
         }
         updatePotentialDamage(state) {
-            const span = document.querySelector("#glotusPotentialDamage");
+            const span = document.querySelector("#coleanPotentialDamage");
             if (span !== null) {
                 span.textContent = state + "";
             }
         }
         updateCollideSpike(state) {
-            const span = document.querySelector("#glotusCollideSpike");
+            const span = document.querySelector("#coleanCollideSpike");
             if (span !== null) {
                 span.textContent = state + "";
             }
         }
         updateDangerState(state) {
-            const span = document.querySelector("#glotusDangerState");
+            const span = document.querySelector("#coleanDangerState");
             if (span !== null) {
                 span.textContent = state + "";
             }
         }
         updateEquipHat(state) {
-            const span = document.querySelector("#glotusEquipHat");
+            const span = document.querySelector("#coleanEquipHat");
             if (span !== null) {
                 span.textContent = state + "";
             }
         }
         updateModulePerformance(state) {
-            const span = document.querySelector("#glotusPerformance");
+            const span = document.querySelector("#coleanPerformance");
             if (span !== null) {
                 span.textContent = state + "";
             }
@@ -15263,30 +15446,30 @@ function createPrivateVisualTheme(menuCSS, hudCSS) {
         if (!isProd) {
             Hook.code = 'console?.log("Loaded bundle..");' + Hook.code;
         }
-        Hook.replace("hookSend", /\(\w+\)\{({VAR} \w+=Array\.prototype\.slice)/, "(...args){Glotus._myClient.PacketManager.send(args);return;$1");
-        Hook.prepend("preRenderLoop", /\w+=Date\.now\(\);\w+=/, "Glotus._Renderer._preRender();");
-        Hook.append("postRenderLoop", /requestAnimationFrame\(\w+\)/, ";Glotus._Renderer._postRender();");
-        Hook.append("mapPreRender", /(\w+)\.lineWidth=NUM{4};/, "Glotus._Renderer._mapPreRender($1);");
-        Hook.prepend("LockRotationClient", /return \w+\?\(\!/, "return Glotus._myClient._ModuleHandler._currentAngle;");
+        Hook.replace("hookSend", /\(\w+\)\{({VAR} \w+=Array\.prototype\.slice)/, "(...args){Colean._myClient.PacketManager.send(args);return;$1");
+        Hook.prepend("preRenderLoop", /\w+=Date\.now\(\);\w+=/, "Colean._Renderer._preRender();");
+        Hook.append("postRenderLoop", /requestAnimationFrame\(\w+\)/, ";Colean._Renderer._postRender();");
+        Hook.append("mapPreRender", /(\w+)\.lineWidth=NUM{4};/, "Colean._Renderer._mapPreRender($1);");
+        Hook.prepend("LockRotationClient", /return \w+\?\(\!/, "return Colean._myClient._ModuleHandler._currentAngle;");
         Hook.replace("DisableResetMoveDir", /\w+={};\w+\.send\("\w+"\)/, "");
-        Hook.append("offset", /\W165\W.+?(\w+)=\w+-\w+\/2;(\w+)=\w+-\w+\/2;/, "Glotus._offset._setXY($1,$2);");
-        Hook.prepend("renderEntity", /\w+\.\w+>NUM{0}.+?(\w+)\.fillStyle=(\w+)==(\w+)/, ";Glotus._hooks._EntityRenderer._render($1,$2,$3);false&&");
-        Hook.append("renderItemPush", /\w+,\w+\.scale\+\((\w+)\.\w+\|\|0\)\)/, "&&(Glotus._Renderer._renderObjects.push($1))");
-        Hook.append("renderItem", /70, 0.35\).+?(\w+)\.strokeStyle.+?;/, "Glotus._hooks._ObjectRenderer._render($1);");
-        Hook.replace("handleUnequip", /\w+\.send\("\w+",0,0,(\w+)\)/, "Glotus._myClient._ModuleHandler._equip($1,0,true,true)");
-        Hook.replace("handleEquip", /\w+\.send\("\w+",0,(.+?),(\w+)\)/, "Glotus._myClient._ModuleHandler._equip($2,$1,true,true)");
-        Hook.replace("handleBuy", /\w+\.send\("\w+",1,(.+?),(\w+)\)/, "Glotus._myClient._ModuleHandler._buy($2,$1,true)");
+        Hook.append("offset", /\W165\W.+?(\w+)=\w+-\w+\/2;(\w+)=\w+-\w+\/2;/, "Colean._offset._setXY($1,$2);");
+        Hook.prepend("renderEntity", /\w+\.\w+>NUM{0}.+?(\w+)\.fillStyle=(\w+)==(\w+)/, ";Colean._hooks._EntityRenderer._render($1,$2,$3);false&&");
+        Hook.append("renderItemPush", /\w+,\w+\.scale\+\((\w+)\.\w+\|\|0\)\)/, "&&(Colean._Renderer._renderObjects.push($1))");
+        Hook.append("renderItem", /70, 0.35\).+?(\w+)\.strokeStyle.+?;/, "Colean._hooks._ObjectRenderer._render($1);");
+        Hook.replace("handleUnequip", /\w+\.send\("\w+",0,0,(\w+)\)/, "Colean._myClient._ModuleHandler._equip($1,0,true,true)");
+        Hook.replace("handleEquip", /\w+\.send\("\w+",0,(.+?),(\w+)\)/, "Colean._myClient._ModuleHandler._equip($2,$1,true,true)");
+        Hook.replace("handleBuy", /\w+\.send\("\w+",1,(.+?),(\w+)\)/, "Colean._myClient._ModuleHandler._buy($2,$1,true)");
         Hook.prepend("RemovePingCall", /\w+&&clearTimeout/, "return;");
         Hook.prepend("RemovePingState", /{VAR} \w+=Date\.now\(\)-\w+/, "return;");
-        Hook.append("preRender", /250\)\);(\w+)\.strokeStyle=\n?.+?;/, "Glotus._hooks._ObjectRenderer._preRender($1);");
-        Hook.replace("upgradeItem", /(upgradeItem.+?onmousedown.+?)\w+\.\w+\("\w+",(\w+)\)\}/, "$1Glotus._myClient._ModuleHandler._upgradeItem($2)}");
+        Hook.append("preRender", /250\)\);(\w+)\.strokeStyle=\n?.+?;/, "Colean._hooks._ObjectRenderer._preRender($1);");
+        Hook.replace("upgradeItem", /(upgradeItem.+?onmousedown.+?)\w+\.\w+\("\w+",(\w+)\)\}/, "$1Colean._myClient._ModuleHandler._upgradeItem($2)}");
         Hook.replace("updateNotificationRemove", /(function \w+\(\w+,\w+\)\{)(\w+\.push\(\{sid)/, "$1return;$2");
         Hook.replace("removeSkins", /(\(\)\{)({VAR} \w+="";for\(let)/, "$1return;$2");
         Hook.prepend("unlockedItems", /\w+\.list\[\w+\]\.\w+==null\|\|\w+\.items/, "true||");
-        Hook.replace("scaleWidth", /(\w+:)1920/, "$1Glotus._ZoomHandler._scale._smooth._w");
-        Hook.replace("scaleHeight", /(\w+:)1080/, "$1Glotus._ZoomHandler._scale._smooth._h");
-        Hook.replace("gameColor", /rgba\(0, 0, 70, 0.35\)/, "rgba(23, 6, 62, 0.6)");
-        Hook.prepend("renderPlayer", /function (\w+)\(\w+,\w+\)\{\w+=\w+\|\|\w+;\w+\.lineWidth=5\.5;/, "Glotus._hooks._renderPlayer=$1;");
+        Hook.replace("scaleWidth", /(\w+:)1920/, "$1Colean._ZoomHandler._scale._smooth._w");
+        Hook.replace("scaleHeight", /(\w+:)1080/, "$1Colean._ZoomHandler._scale._smooth._h");
+        Hook.replace("gameColor", /rgba\(0, 0, 70, 0.35\)/, "rgba(0, 0, 0, 0)");
+        Hook.prepend("renderPlayer", /function (\w+)\(\w+,\w+\)\{\w+=\w+\|\|\w+;\w+\.lineWidth=5\.5;/, "Colean._hooks._renderPlayer=$1;");
         Hook.replace("RemoveSendAngle", /(\w+)!==(\w+)&&\(\w+=\w+,\w+\.send\("D",\w+\)\)/, "false");
         Logger.test(`Modified bundle, total amount of hooks: ${Hook.hookCount}/${Hook.hookAttempts}`);
         return PrivateVisualTheme.transformBundle(Hook.code);
@@ -15299,7 +15482,7 @@ function createPrivateVisualTheme(menuCSS, hudCSS) {
             this.loadScript(node.src);
         }
         loadScript(src) {
-            src = "https://raw.githubusercontent.com/ItzYakudza/Colean-Client/refs/heads/main/public/bundle.txt";
+            src = "https://raw.githubusercontent.com/ItzYakudza/colean-client/refs/heads/main/bundle.txt";
             const xhr = new XMLHttpRequest;
             xhr.open("GET", src, false);
             xhr.send();
@@ -15479,7 +15662,7 @@ function createPrivateVisualTheme(menuCSS, hudCSS) {
             deleteProp(that, "onblur");
             that.addEventListener("focus", that.onfocus);
             deleteProp(that, "onfocus");
-            Glotus._config = config;
+            Colean._config = config;
             Logger.log("Intercepted config..");
             return loadedFast;
         });
@@ -15607,7 +15790,7 @@ function createPrivateVisualTheme(menuCSS, hudCSS) {
             if (!player.inGame) {
                 return;
             }
-            const offset = Glotus._offset;
+            const offset = Colean._offset;
             ctx.save();
             ctx.translate(pos.x - offset.x, pos.y - offset.y);
             ctx.rotate(player.angle);
@@ -15616,7 +15799,7 @@ function createPrivateVisualTheme(menuCSS, hudCSS) {
             const {autoHat: autoHat} = client._ModuleHandler.staticModules;
             const weaponID = autoHat.getNextWeaponID();
             const variant = player.getWeaponVariant(weaponID).current;
-            Glotus._hooks._renderPlayer({
+            Colean._hooks._renderPlayer({
                 weaponIndex: weaponID,
                 buildIndex: autoHat.getNextItemID(),
                 tailIndex: autoHat.getNextAcc(),
@@ -15633,7 +15816,7 @@ function createPrivateVisualTheme(menuCSS, hudCSS) {
             const now = Date.now();
             const delta = now - this.start;
             this.start = now;
-            const offset = Glotus._offset;
+            const offset = Colean._offset;
             for (const player of this.deadPlayers) {
                 player.update(delta);
                 ctx.save();
@@ -15641,7 +15824,7 @@ function createPrivateVisualTheme(menuCSS, hudCSS) {
                 ctx.rotate(player.rotation);
                 ctx.globalAlpha = player.opacity;
                 ctx.strokeStyle = "#525252";
-                Glotus._hooks._renderPlayer({
+                Colean._hooks._renderPlayer({
                     weaponIndex: player.weapon,
                     buildIndex: -1,
                     tailIndex: player.accID,
@@ -15727,8 +15910,8 @@ function createPrivateVisualTheme(menuCSS, hudCSS) {
         volcanoBoxPos=new Vector_default(14400, 14400).sub(this.volcanoBoxSize);
         volcanoPos=new Vector_default(13960, 13960);
         _preRender(ctx) {
-            const offsetX = Glotus._offset.x;
-            const offsetY = Glotus._offset.y;
+            const offsetX = Colean._offset.x;
+            const offsetY = Colean._offset.y;
             ctx.save();
             ctx.globalAlpha = .5;
             ctx.strokeStyle = "red";
@@ -15813,9 +15996,9 @@ function createPrivateVisualTheme(menuCSS, hudCSS) {
     };
 
     win.Colean = Colean;
+    window.Colean = Colean;
+    
     const myClient = client;
-    // Keep window.Glotus alias so bundle hooks (Glotus._myClient) keep working
-    win.Glotus = Colean;
     try {
         Colean.author = CLIENT_AUTHOR;
         Colean.version = CLIENT_VERSION;
@@ -15992,16 +16175,16 @@ function createPrivateVisualTheme(menuCSS, hudCSS) {
         }
 
         #${PANEL_ID} .gmx-tab:hover {
-             background: #380a0a;
+             background: #1b527a;
         }
 
         #${PANEL_ID} .gmx-tab.active {
 
             background: linear-gradient(90deg, #3d8fd4, #2a5080);
             color: #FFF;
-            box-shadow: 0 4px 10px rgba(176,0,0,0.6);
+            box-shadow: 0 4px 10px rgba(62,143,212,0.45);
             transform: translateY(-1px);
-            border-color: #FF4444;
+            border-color: #6eb6ff;
         }
 
 
@@ -16011,7 +16194,7 @@ function createPrivateVisualTheme(menuCSS, hudCSS) {
             max-height: calc(70vh - 120px);
             overflow: auto;
 
-            border: 1px solid rgba(85,0,0,0.5);
+            border: 1px solid rgba(62,143,212,0.45);
             border-radius: 4px;
         }
 
@@ -16029,11 +16212,11 @@ function createPrivateVisualTheme(menuCSS, hudCSS) {
             justify-content: space-between;
             align-items: center;
             padding: 6px 0;
-            border-bottom: 1px dashed rgba(176,0,0,0.3);
+            border-bottom: 1px dashed rgba(62,143,212,0.3);
         }
 
         #${PANEL_ID} .gmx-key-btn {
-            background: #280808;
+            background: #123752;
             border: 1px solid #3d8fd4;
             color: #c5d4e0;
             padding: 4px 8px;
@@ -16045,7 +16228,7 @@ function createPrivateVisualTheme(menuCSS, hudCSS) {
         }
 
         #${PANEL_ID} .gmx-key-btn:hover {
-            background: #401010;
+            background: #1b527a;
         }
 
         #${PANEL_ID} .gmx-key-btn.active {
@@ -16059,7 +16242,7 @@ function createPrivateVisualTheme(menuCSS, hudCSS) {
             align-items: center;
             justify-content: center;
             gap: 8px;
-            background: #280808;
+            background: #123752;
             color: #c5d4e0;
             border: 1px solid #2a5080;
             padding: 8px 10px;
@@ -16084,14 +16267,14 @@ function createPrivateVisualTheme(menuCSS, hudCSS) {
 
 
         #${PANEL_ID} .gmx-btn:hover {
-            background: #401010;
-            box-shadow: 0 0 6px rgba(176,0,0,0.3);
+            background: #1b527a;
+            box-shadow: 0 0 6px rgba(62,143,212,0.3);
             transform: scale(1.02);
         }
 
         #${PANEL_ID} .gmx-btn:active {
             transform: scale(0.97);
-            background: #551515;
+            background: #0f3654;
             box-shadow: inset 0 2px 4px rgba(0,0,0,0.5);
         }
 
@@ -16244,21 +16427,6 @@ function createPrivateVisualTheme(menuCSS, hudCSS) {
         <button id="btn-trap-animals" class="gmx-btn" title="Bots trap approaching hostile animals. Moofie, Moostafa and other trap-immune animals receive a spike. Uses a spike if a trap is unavailable. Neutral animals are ignored. Repeats only for a renewed attack or a different approach.">Trap Animals</button>
     </div>
 
-    <div class="gmx-row" style="margin-top: 10px;">
-        <select id="hatloop-mode" style="flex:1;" title="HatLoop item selection mode.">
-            <option value="free">Free Hats</option>
-            <option value="all">All Hats</option>
-        </select>
-        <button id="btn-hatloop" class="gmx-btn" style="flex:2;" title="Automatic hat cycling.">HatLoop</button>
-    </div>
-
-    <div class="gmx-row" style="margin-top: 10px;">
-        <select id="accloop-mode" style="flex:1;" title="AccLoop item selection mode.">
-            <option value="all">All Accessories</option>
-            <option value="wings">Wings only</option>
-        </select>
-        <button id="btn-accloop" class="gmx-btn" style="flex:2;" title="Automatic accessory cycling.">AccLoop</button>
-    </div>
 
 </div>
 
@@ -16267,7 +16435,7 @@ function createPrivateVisualTheme(menuCSS, hudCSS) {
     <div class="gmx-row" style="margin-top: 10px; border-top: 1px solid rgba(255,255,255,0.02); padding-top: 10px;">
         <span style="flex:2; padding: 0 10px; line-height: 28px; text-align: left; color: #ccc;" title="Sets the distance for the 'Follow' mode.">Follow Radius:</span>
 
-        <input id="follow-radius" type="number" placeholder="Radius (175)" value="${window.BOT_FOLLOW_RADIUS || 175}" style="flex:1;" title="The radius to maintain when following the owner. Default: 175.">
+        <input id="follow-radius" type="number" placeholder="Base distance (175)" value="${window.BOT_FOLLOW_RADIUS || 175}" style="flex:1;" title="Base follow distance. Nearby bots form a tight wedge behind you.">
     </div>
 
     <div class="gmx-row" style="border-bottom: 1px solid rgba(255,255,255,0.02); padding-bottom: 10px;">
@@ -16389,8 +16557,6 @@ function createPrivateVisualTheme(menuCSS, hudCSS) {
         'cursorfollow': 'btn-cursorfollow',
         'grinder': 'btn-grind',
         'ap': 'btn-ap',
-        'accloop': 'btn-accloop',
-        'hatloop': 'btn-hatloop',
         'autoshoot': 'btn-autoshoot',
         'autoplacer': 'btn-autoplacer',
         'surround': 'btn-surround',
@@ -16415,8 +16581,6 @@ function createPrivateVisualTheme(menuCSS, hudCSS) {
             'Follow Cursor': 'cursorfollow',
             'Grinder': 'grinder',
             'AutoPlatform': 'ap',
-            'AccLoop': 'accloop',
-            'Hatloop': 'hatloop',
             'Autoshoot': 'autoshoot',
             'AutoPlacer': 'autoplacer',
             'Surround Enemy': 'surround',
@@ -16606,14 +16770,6 @@ function createPrivateVisualTheme(menuCSS, hudCSS) {
             const mode = readOwnerCommanderField('all','mode') || 'stay';
             const ap = !!readOwnerCommanderField('all','apEnabled');
             const trapAnimals = !!readOwnerCommanderField('all','trapAnimals');
-            const al = !!readOwnerCommanderField('all','accLoop');
-            const hl = !!readOwnerCommanderField('all','hatLoop');
-            const hlMode = readOwnerCommanderField('all','hatLoopMode') || 'free';
-            const alMode = readOwnerCommanderField('all','accLoopMode') || 'all';
-            const hlSelect = p.querySelector('#hatloop-mode');
-            if(hlSelect) hlSelect.value = hlMode;
-            const alSelect = p.querySelector('#accloop-mode');
-            if(alSelect) alSelect.value = alMode;
             const movementPage = p.querySelector('.gmx-page[data-tab="movement"]');
         if (movementPage && movementPage.style.display === 'block') {
             if (typeof populatePlayerList === 'function') {
@@ -16633,8 +16789,6 @@ function createPrivateVisualTheme(menuCSS, hudCSS) {
             p.querySelector('#autoshoot-platform').checked = Settings_default._botAutoShootPlatform;
             p.querySelector('#autoshoot-range').value = BotAutoShoot.range();
             p.querySelector('#autoshoot-range-value').textContent = BotAutoShoot.range();
-            toggleBtnActive(p.querySelector('#btn-hatloop'), hl);
-            toggleBtnActive(p.querySelector('#btn-accloop'), al);
             const syncBtn = p.querySelector('#btn-botsync');
             toggleBtnActive(syncBtn, Settings_default._botSync);
             syncBtn.textContent = 'Sync ' + (Settings_default._botSync ? 'ON' : 'OFF');
@@ -16757,7 +16911,7 @@ el('#follow-radius').onchange = () => {
     el('#follow-radius').value = newVal;
 
 
-    window.BOT_FOLLOW_RADIUS = newVal;
+    window.BOT_FOLLOW_RADIUS = Math.max(80, Math.min(400, newVal));
 
 
     panelFeedback(p, `Follow Radius ${newVal} (Saved)`);
@@ -16775,7 +16929,7 @@ el('#btn-follow').onclick = () => {
     const r = Math.max(40, Math.min(1200, safeNum(el('#follow-radius')?.value, 175)));
 
 
-    window.BOT_FOLLOW_RADIUS = r;
+    window.BOT_FOLLOW_RADIUS = Math.max(80, Math.min(400, r));
 
 
     setOwnerCommanderField('all','mode','follow');
@@ -16807,43 +16961,7 @@ el('#btn-follow').onclick = () => {
             animate(el('#btn-ap')); refreshToggles(p); panelFeedback(p, `AutoPlatform ${!cur ? 'ON' : 'OFF'} → all`);
         };
 
-el('#btn-hatloop').onclick = () => {
-    const cur = !!readOwnerCommanderField('all','hatLoop');
-    const mode = el('#hatloop-mode')?.value || 'free';
-    setOwnerCommanderField('all','hatLoop', !cur);
-    setOwnerCommanderField('all','hatLoopMode', mode);
-    animate(el('#btn-hatloop')); refreshToggles(p); panelFeedback(p, `HatLoop ${!cur ? 'ON' : 'OFF'} (${mode}) → all`);
-};
 
-el('#hatloop-mode').onchange = () => {
-    const mode = el('#hatloop-mode')?.value || 'free';
-    setOwnerCommanderField('all', 'hatLoopMode', mode);
-    panelFeedback(p, `HatLoop mode set to: ${mode}`);
-
-    if (!!readOwnerCommanderField('all', 'hatLoop')) {
-         setOwnerCommanderField('all','hatLoop', true);
-    }
-};
-        el('#btn-accloop').onclick = () => {
-    const cur = !!readOwnerCommanderField('all','accLoop');
-    const mode = el('#accloop-mode')?.value || 'all';
-    setOwnerCommanderField('all','accLoop', !cur);
-    setOwnerCommanderField('all','accLoopMode', mode);
-    animate(el('#btn-accloop'));
-    refreshToggles(p);
-    panelFeedback(p, `AccLoop ${!cur ? 'ON' : 'OFF'} (${mode}) → all`);
-};
-
-
-el('#accloop-mode').onchange = () => {
-    const mode = el('#accloop-mode')?.value || 'all';
-    setOwnerCommanderField('all', 'accLoopMode', mode);
-    panelFeedback(p, `AccLoop mode set to: ${mode}`);
-
-    if (!!readOwnerCommanderField('all', 'accLoop')) {
-         setOwnerCommanderField('all','accLoop', true);
-    }
-};
 
         // Combat
 
