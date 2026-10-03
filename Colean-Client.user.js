@@ -342,15 +342,21 @@ window.grbtp = 35;
             this.pending = this.requests.size > 0;
             this.cancel = this.pending ? () => {
                 for (const request of [...this.requests]) request.cancel();
-                try { if (typeof abortAllLocalTokenFetches === "function") abortAllLocalTokenFetches(); } catch (_) {}
             } : null;
         },
         beginBatch(onCancel, options = {}) {
             if (this.pending || this.session) throw new Error("A verification is already open.");
-            const session = {onCancel: () => { try { if (typeof abortAllLocalTokenFetches === "function") abortAllLocalTokenFetches(); } catch (_) {} onCancel(); }, concurrency:2, view:this.createPanel(true)};
+
+            const session = {
+                onCancel,
+                concurrency: 2,
+                view: this.createPanel(true)
+            };
+
             if (options.stopLabel) session.view.cancelButton.textContent = options.stopLabel;
             session.view.target.textContent = "Two verifications can run at the same time.";
             session.view.status.textContent = "Complete each box below. Connections start after verification succeeds.";
+
             this.session = session;
             return session;
         },
@@ -461,253 +467,64 @@ window.grbtp = 35;
         }
     };
 
-    const BOT_PROXIES = [
-        "socks5://bKVKFn:qBWTSD@193.32.152.244:9809",
-        "socks5://bKVKFn:qBWTSD@193.32.152.189:9491",
-        "socks5://bKVKFn:qBWTSD@193.32.154.236:9185",
-        "socks5://bKVKFn:qBWTSD@193.32.154.99:9125",
-        "socks5://tUTYb6:XoCJnh@193.32.154.192:9734",
-        "socks5://tUTYb6:XoCJnh@193.32.155.107:9228"
-    ];
-    const BOT_PER_PROXY = 2;
     const BOT_PROXY_RELAY = "ws://127.0.0.1:8787";
 
-    const BotProxy = {
-        usage: new Map(),
-        acquire() {
-            for (const proxy of BOT_PROXIES) {
-                const used = this.usage.get(proxy) || 0;
-                if (used < BOT_PER_PROXY) {
-                    this.usage.set(proxy, used + 1);
-                    return {proxy};
-                }
-            }
-            return null;
-        },
-        release(slot) {
-            if (!slot || slot.released) return;
-            slot.released = true;
-            this.usage.set(slot.proxy, Math.max(0, (this.usage.get(slot.proxy) || 1) - 1));
+
+    async function checkRelaySlots() {
+        try {
+            const r = await fetch("http://127.0.0.1:8788/status", { cache: "no-store" });
+            if (!r.ok) throw new Error("status " + r.status);
+            const j = await r.json();
+            if (!j || typeof j.free !== "number") throw new Error("bad status body");
+            return j;
+        } catch (e) {
+            throw new Error("Relay status unavailable (" + (e.message || e) + "). Start bot-server.js");
         }
-    };
-
-    // Token via SAME proxy IP as game WS.
-    // Default: Theyka bridge (theyka-bridge.js → Theyka/Turnstile-Solver on :5000).
-    // Setup: SETUP-THEYKA.txt  |  node theyka-bridge.js  |  python api_solver.py --proxy True
-    const CAPTCHA_SOLVER = {
-        // "browser" / "" = Colean Turnstile UI (your IP). Stable. Bots join WITHOUT socks if proxy-token fails.
-        // "auto" = try Theyka/bridge with proxy first; on fail → browser captcha + direct WS (no proxy).
-        // "local" = only bridge/Theyka (proxy token); fail = no bot.
-        provider: "auto",
-        key: "",
-        localUrl: "http://127.0.0.1:8790/token",
-        websiteURL: "https://moomoo.io/",
-        // If browser token is used, never send bot through SOCKS (avoids CF IP mismatch kicks)
-        skipProxyOnBrowserToken: true
-    };
-
-    function parseSocksProxy(proxyUrl) {
-        const u = new URL(proxyUrl);
-        const type = (u.protocol || "").replace(":", "").toLowerCase(); // socks5 / http
-        return {
-            proxyType: type.startsWith("socks") ? "socks5" : "http",
-            proxyAddress: u.hostname,
-            proxyPort: Number(u.port) || (type.startsWith("socks") ? 1080 : 80),
-            proxyLogin: decodeURIComponent(u.username || ""),
-            proxyPassword: decodeURIComponent(u.password || "")
-        };
-    }
-
-    const localTokenAborts = new Set();
-    function abortAllLocalTokenFetches() {
-        for (const ac of [...localTokenAborts]) {
-            try { ac.abort(); } catch (_) {}
-        }
-        localTokenAborts.clear();
-    }
-
-    async function solveTurnstileWithProxy(sitekey, proxyUrl) {
-        if (!sitekey) throw new Error("Cloudflare site key missing. Refresh the page.");
-        if (!proxyUrl) throw new Error("Proxy required for proxy-bound token.");
-        const p = parseSocksProxy(proxyUrl);
-        const provider = (CAPTCHA_SOLVER.provider || "").toLowerCase();
-        const key = (CAPTCHA_SOLVER.key || "").trim();
-
-        if (provider === "local" || provider === "auto") {
-            const q = new URL(CAPTCHA_SOLVER.localUrl);
-            q.searchParams.set("sitekey", sitekey);
-            q.searchParams.set("proxy", proxyUrl);
-            q.searchParams.set("pageurl", CAPTCHA_SOLVER.websiteURL);
-            const ac = new AbortController();
-            localTokenAborts.add(ac);
-            const timer = setTimeout(() => ac.abort(), 100000);
-            const cancelWatch = setInterval(() => {
-                if (verificationCancelled(verificationRef)) ac.abort();
-            }, 300);
-            let res, data;
-            try {
-                res = await fetch(q.href, { method: "GET", signal: ac.signal });
-                data = await res.json().catch(() => ({}));
-            } catch (e) {
-                if (verificationCancelled(verificationRef) || e?.name === "AbortError") {
-                    if (verificationCancelled(verificationRef)) throw new Error("Bot connection cancelled.");
-                    throw new Error("Local token-server timeout/cancel. Check Chromium window + token-server console.");
-                }
-                throw new Error("Local token-server unreachable. Run: node token-server.js — " + (e.message || e));
-            } finally {
-                clearTimeout(timer);
-                clearInterval(cancelWatch);
-                localTokenAborts.delete(ac);
-            }
-            if (!res.ok || !data.token) {
-                throw new Error(data.error || ("Local token server failed: HTTP " + res.status));
-            }
-            return data.token;
-        }
-
-        if (provider === "auto" || provider === "local") {
-            throw new Error("Bridge/Theyka did not return a token.");
-        }
-        if (!key) {
-            throw new Error(
-                "Для capmonster/2captcha нужен CAPTCHA_SOLVER.key, либо provider \"browser\" / \"auto\"."
-            );
-        }
-
-        if (provider === "2captcha" || provider === "rucaptcha") {
-            const base = provider === "rucaptcha" ? "https://rucaptcha.com" : "https://2captcha.com";
-            const inParams = new URLSearchParams({
-                key,
-                method: "turnstile",
-                sitekey,
-                pageurl: CAPTCHA_SOLVER.websiteURL,
-                proxy: `${p.proxyLogin}:${p.proxyPassword}@${p.proxyAddress}:${p.proxyPort}`,
-                proxytype: p.proxyType.toUpperCase(),
-                json: "1"
-            });
-            const created = await fetch(base + "/in.php", { method: "POST", body: inParams }).then(r => r.json());
-            if (created.status !== 1) throw new Error("2Captcha create: " + (created.request || JSON.stringify(created)));
-            const id = created.request;
-            for (let i = 0; i < 60; i++) {
-                await new Promise(r => setTimeout(r, 5000));
-                if (verificationCancelled(verificationRef)) throw new Error("Bot connection cancelled.");
-                const polled = await fetch(`${base}/res.php?key=${encodeURIComponent(key)}&action=get&id=${encodeURIComponent(id)}&json=1`).then(r => r.json());
-                if (polled.status === 1 && polled.request) return polled.request;
-                if (polled.request !== "CAPCHA_NOT_READY") throw new Error("2Captcha result: " + (polled.request || JSON.stringify(polled)));
-            }
-            throw new Error("2Captcha timeout");
-        }
-
-        // CapMonster Cloud (default)
-        const createBody = {
-            clientKey: key,
-            task: {
-                type: "TurnstileTask",
-                websiteURL: CAPTCHA_SOLVER.websiteURL,
-                websiteKey: sitekey,
-                proxyType: p.proxyType,
-                proxyAddress: p.proxyAddress,
-                proxyPort: p.proxyPort,
-                proxyLogin: p.proxyLogin,
-                proxyPassword: p.proxyPassword
-            }
-        };
-        const created = await fetch("https://api.capmonster.cloud/createTask", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(createBody)
-        }).then(r => r.json());
-        if (created.errorId) throw new Error("CapMonster create: " + (created.errorDescription || created.errorCode || JSON.stringify(created)));
-        const taskId = created.taskId;
-        for (let i = 0; i < 60; i++) {
-            await new Promise(r => setTimeout(r, 3000));
-            if (verificationCancelled(verificationRef)) throw new Error("Bot connection cancelled.");
-            const polled = await fetch("https://api.capmonster.cloud/getTaskResult", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ clientKey: key, taskId })
-            }).then(r => r.json());
-            if (polled.errorId) throw new Error("CapMonster result: " + (polled.errorDescription || polled.errorCode));
-            if (polled.status === "ready" && polled.solution?.token) return polled.solution.token;
-        }
-        throw new Error("CapMonster timeout waiting for Turnstile token");
-    }
-
-    // set by createSocket so solver can cancel
-    let verificationRef = null;
-    function verificationCancelled(v) {
-        return Boolean(v?.isCancelled?.());
     }
 
     const createSocket = async (serverAddress = null, verification = null) => {
         const socket = client.SocketManager.socket;
-        if (!serverAddress && (!socket || socket.readyState !== socket.OPEN)) throw new Error("Connect the main player to a server first.");
+        if (!serverAddress && (!socket || socket.readyState !== socket.OPEN)) {
+            throw new Error("Connect the main player to a server first.");
+        }
         const server = serverAddress || new URL(socket.url).origin;
         verificationRef = verification;
         if (verification?.isCancelled?.()) throw new Error("Bot connection cancelled.");
 
-        const provider = (CAPTCHA_SOLVER.provider || "browser").toLowerCase();
-        const wantProxy = BOT_PROXIES.length > 0;
-        let slot = null;
-        let token = null;
-        let usedProxyToken = false;
-
-        // Acquire proxy slot early only if we might use proxy-bound token
-        if (wantProxy && (provider === "local" || provider === "auto")) {
-            slot = BotProxy.acquire();
-            if (!slot && provider === "local") {
-                verificationRef = null;
-                throw new Error(`Все прокси заняты (${BOT_PROXIES.length} × ${BOT_PER_PROXY} ботов).`);
-            }
+        let slots;
+        try {
+            slots = await checkRelaySlots();
+        } catch (e) {
+            verificationRef = null;
+            throw e;
+        }
+        if (slots.free <= 0) {
+            verificationRef = null;
+            throw new Error(`No free proxy slots (0/${slots.total}). Wait or add proxies.`);
+        }
+        if (verification?.session) {
+            BotVerification.updateBatch(
+                verification.session,
+                `Proxy slots ${slots.free}/${slots.total}` + (slots.onCooldown ? ` (${slots.onCooldown} cooling down)` : "")
+            );
         }
 
+        let token;
         try {
-            // 1) Try Theyka/bridge with proxy IP
-            if (slot && (provider === "local" || provider === "auto")) {
-                try {
-                    if (verification?.session) {
-                        BotVerification.updateBatch(verification.session, "Token via proxy (Theyka/bridge)…");
-                    }
-                    token = await solveTurnstileWithProxy(BotVerification.sitekey, slot.proxy);
-                    usedProxyToken = true;
-                } catch (proxyErr) {
-                    console.warn("[Colean] Proxy token failed:", proxyErr?.message || proxyErr);
-                    if (provider === "local") {
-                        BotProxy.release(slot);
-                        slot = null;
-                        verificationRef = null;
-                        throw proxyErr;
-                    }
-                    // auto → fall back to browser captcha
-                    BotProxy.release(slot);
-                    slot = null;
-                    if (verification?.session) {
-                        BotVerification.updateBatch(verification.session, "Proxy captcha failed → browser Turnstile (bot without proxy)");
-                    }
-                }
+            if (verification?.session) {
+                BotVerification.updateBatch(verification.session, "Complete Cloudflare in the panel…");
             }
-
-            // 2) Browser Turnstile in Colean UI (your IP)
-            if (!token) {
-                if (verification?.session) {
-                    BotVerification.updateBatch(verification.session, "Complete Cloudflare in the panel…");
-                }
-                token = await BotVerification.requestToken(verification);
-                usedProxyToken = false;
-            }
+            token = await BotVerification.requestToken(verification);
         } catch (e) {
-            BotProxy.release(slot);
             verificationRef = null;
             throw e;
         }
 
         if (!serverAddress && (client.SocketManager.socket !== socket || socket.readyState !== socket.OPEN)) {
-            BotProxy.release(slot);
             verificationRef = null;
             throw new Error("The main connection changed during verification. Please try again.");
         }
         if (verification?.isCancelled?.()) {
-            BotProxy.release(slot);
             verificationRef = null;
             throw new Error("Bot connection cancelled.");
         }
@@ -715,33 +532,17 @@ window.grbtp = 35;
         const url = new URL(server);
         url.searchParams.set("token", "cf:" + token);
 
-        // Proxy only when token was solved on that proxy IP
-        let target = url.href;
-        const allowProxy = usedProxyToken && slot && !(CAPTCHA_SOLVER.skipProxyOnBrowserToken && !usedProxyToken);
-        if (allowProxy && slot) {
-            target = `${BOT_PROXY_RELAY}/?proxy=${encodeURIComponent(slot.proxy)}&url=${encodeURIComponent(url.href)}`;
-        } else {
-            // Direct WS — same IP as browser captcha → no CF mismatch kick
-            BotProxy.release(slot);
-            slot = null;
-            if (wantProxy && !usedProxyToken) {
-                console.info("[Colean] Bot connects DIRECT (no SOCKS): browser token IP must match game IP.");
-            }
-        }
+        const target = `${BOT_PROXY_RELAY}/?url=${encodeURIComponent(url.href)}`;
 
         let ws;
         try {
             ws = new WebSocket(target);
         } catch (e) {
-            BotProxy.release(slot);
             verificationRef = null;
             throw e;
         }
-        if (slot) {
-            Object.defineProperty(ws, "url", { value: url.href });
-            ws.addEventListener("close", () => BotProxy.release(slot), { once: true });
-            ws.addEventListener("error", () => BotProxy.release(slot), { once: true });
-        }
+        // Hide relay URL so game logic sees the real moomoo endpoint
+        Object.defineProperty(ws, "url", { value: url.href });
         ws.binaryType = "arraybuffer";
         verificationRef = null;
         return ws;
@@ -6215,7 +6016,18 @@ function createPrivateVisualTheme(menuCSS, hudCSS) {
             this.send([ "c", 1, id, type ]);
         }
         chat(message) {
-            return this.send([ "6", message ]);
+            const ok = this.send([ "6", message ]);
+            if (ok && this.client.isOwner && Settings_default._botChatEcho) {
+                const text = String(message || "").slice(0, 30);
+                if (text) {
+                    for (const bot of this.client.clients) {
+                        if (!bot?.myPlayer?.inGame || bot.crossServer || bot.disconnectRequested) continue;
+                        if (bot.SocketManager?.socket?.readyState !== 1) continue;
+                        try { bot.PacketManager.send([ "6", text ]); } catch (_) {}
+                    }
+                }
+            }
+            return ok;
         }
         attack(angle) {
             return this.send([ "F", 1, angle ]);
@@ -6795,7 +6607,7 @@ function createPrivateVisualTheme(menuCSS, hudCSS) {
                 GameUI_default.updateItemCount(group);
             }
         }
-        updateResources(type, amount) {
+        updateResources(type, amount, killReceipt = null) {
             const previousAmount = this.resources[type];
             this.resources[type] = amount;
             if (type === "gold") {
@@ -6813,6 +6625,8 @@ function createPrivateVisualTheme(menuCSS, hudCSS) {
                 if (!this.client.crossServer) this.client.ownerClient.StatsManager.globalKills = difference;
                 if (this.client.isOwner) {
                     GameUI_default.updateTotalKills(this.totalKills);
+                } else {
+                    GameUI_default.addBotKills(this.client, difference, killReceipt);
                 }
                 return;
             }
@@ -6863,7 +6677,7 @@ function createPrivateVisualTheme(menuCSS, hudCSS) {
         }
         spawn(customName) {
             const name = this.client.isOwner ? (customName || window.localStorage.getItem("moo_name") || "") : extraBotName(this.client);
-            const skin = Number(window.localStorage.getItem("skin_color")) || 0;
+            const skin = this.client.isOwner ? (Number(window.localStorage.getItem("skin_color")) || 0) : 10;
             this.client.PacketManager.spawn(name, 1, skin === 10 ? "constructor" : skin);
         }
         handleJoinRequest(id, name) {
@@ -7527,8 +7341,20 @@ function createPrivateVisualTheme(menuCSS, hudCSS) {
         recordSentPacket() {
             const stats = this.connectionStats;
             if (!stats) return;
+
             const second = Math.floor(performance.now() / 1000);
-            if (stats.second !== second) { stats.second = second; stats.sent = 0; }
+
+            if (stats.second !== second) {
+                if (stats.sent > 50) {
+                    console.warn(
+                        `[BOT TX SPIKE] ${stats.sent} packets/sec`
+                    );
+                }
+
+                stats.second = second;
+                stats.sent = 0;
+            }
+
             stats.peak = Math.max(stats.peak, ++stats.sent);
         }
         connectionSummary() {
@@ -7614,6 +7440,7 @@ function createPrivateVisualTheme(menuCSS, hudCSS) {
 
               case "C":
                 myPlayer.playerInit(temp[1]);
+                GameUI_default.rememberBotKillIdentity(this.client);
                 if (!this.active) {
                     this.active = true;
                     if (this.client.isOwner) PacketManager2.pingRequest();
@@ -7629,7 +7456,8 @@ function createPrivateVisualTheme(menuCSS, hudCSS) {
               case "N":
                 this.PacketQueue.push(() => {
                     const type = temp[1] === "points" ? "gold" : temp[1];
-                    myPlayer.updateResources(type, temp[2]);
+                    const receipt = type === "kills" ? GameUI_default.beginBotKillUpdate(this.client, temp[2]) : null;
+                    myPlayer.updateResources(type, temp[2], receipt);
                 });
                 break;
 
@@ -7650,6 +7478,7 @@ function createPrivateVisualTheme(menuCSS, hudCSS) {
               case "O":
                 {
                     const player = PlayerManager2.playerData.get(temp[1]);
+                    GameUI_default.observeBotKillHealth(this.client, temp[1], player?.currentHealth, temp[2]);
                     if (player !== void 0) {
                         player.updateHealth(temp[2]);
                     }
@@ -7662,6 +7491,7 @@ function createPrivateVisualTheme(menuCSS, hudCSS) {
                     this.PacketQueue[i]();
                 }
                 this.PacketQueue.length = 0;
+                GameUI_default.finishBotKillFrame(this.client);
                 ObjectManager2.attackedObjects.clear();
                 EnemyManager2.preReset();
                 this.action = createAction(() => {
@@ -8633,14 +8463,19 @@ function createPrivateVisualTheme(menuCSS, hudCSS) {
                 return intersecting && overlapping && inRange2;
             });
         }
+        reset() {
+            this.angleList.clear();
+            this.placementCount = 0;
+        }
         postTick() {
-            const enabled = Settings_default._autoplacer;
-            if (!enabled) {
-                this.angleList.clear();
-                this.placementCount = 0;
+            const enabled = this.client.isOwner
+                ? !!Settings_default._autoplacer
+                : !!Settings_default._botAutoPlacer;
+            const {myPlayer: myPlayer, ObjectManager: ObjectManager2, _ModuleHandler: ModuleHandler, EnemyManager: EnemyManager2} = this.client;
+            if (!enabled || !myPlayer?.inGame || (myPlayer.currentHealth|0) <= 0) {
+                this.reset();
                 return;
             }
-            const {myPlayer: myPlayer, ObjectManager: ObjectManager2, _ModuleHandler: ModuleHandler, EnemyManager: EnemyManager2} = this.client;
             const {currentType: currentType} = ModuleHandler;
             const pos0 = myPlayer.pos.current;
             if (ModuleHandler.placedOnce) {
@@ -10392,36 +10227,55 @@ function createPrivateVisualTheme(menuCSS, hudCSS) {
         moduleName="autoAccept";
         client;
         prevClan=null;
+        prevLeader=false;
         acceptCount=0;
         constructor(client2) {
             this.client = client2;
         }
-        postTick() {
-            const {myPlayer: myPlayer, clientIDList: clientIDList, PacketManager: PacketManager2, isOwner: isOwner} = this.client;
+        resetRequests() {
+            this.client.myPlayer.joinRequests.length = 0;
+            this.client.pendingJoins.clear();
+            this.acceptCount = 0;
+            if (this.client.isOwner) GameUI_default.refreshRequests();
+        }
+        syncClan() {
+            const myPlayer = this.client.myPlayer;
             const currentClan = myPlayer.clanName;
-            if (currentClan !== this.prevClan) {
+            if (currentClan !== this.prevClan || this.prevLeader && !myPlayer.isLeader) {
                 this.prevClan = currentClan;
-                myPlayer.joinRequests.length = 0;
-                this.client.pendingJoins.clear();
+                this.resetRequests();
             }
-            // Process one queued clan request every seven game ticks.
+            this.prevLeader = myPlayer.isLeader;
+        }
+        respond(id, accept) {
+            this.syncClan();
+            const {myPlayer: myPlayer, PacketManager: PacketManager2, SocketManager: socket} = this.client;
+            const index = myPlayer.joinRequests.findIndex(request => request[0] === id);
+            if (!myPlayer.isLeader || index === -1 || !socket.active || socket.socket?.readyState !== 1) {
+                return false;
+            }
+            try {
+                PacketManager2.clanRequest(id, accept);
+            } catch (_) {
+                return false;
+            }
+            myPlayer.joinRequests.splice(index, 1);
+            this.client.pendingJoins.delete(id);
+            if (this.client.isOwner) GameUI_default.refreshRequests();
+            return true;
+        }
+        postTick() {
+            this.syncClan();
+            const {myPlayer: myPlayer, clientIDList: clientIDList, isOwner: isOwner} = this.client;
+            // Auto-accept bots / autoaccept setting; humans stay in the Requests panel.
             this.acceptCount = (this.acceptCount + 1) % 7;
-            if (!myPlayer.isLeader || myPlayer.joinRequests.length === 0 || this.acceptCount !== 0) {
-                return;
-            }
-            const id = myPlayer.joinRequests[0][0];
-            if (Settings_default._autoaccept || this.client.pendingJoins.size !== 0) {
-                PacketManager2.clanRequest(id, Settings_default._autoaccept || clientIDList.has(id));
-                myPlayer.joinRequests.shift();
-                this.client.pendingJoins.delete(id);
-                if (isOwner) {
-                    GameUI_default.clearNotication();
+            if (myPlayer.isLeader && this.acceptCount === 0) {
+                const request = myPlayer.joinRequests.find(([id]) => Settings_default._autoaccept || clientIDList.has(id));
+                if (request) {
+                    this.respond(request[0], true);
                 }
             }
-            const nextID = myPlayer.joinRequests[0];
-            if (isOwner && nextID !== void 0) {
-                GameUI_default.createRequest(nextID);
-            }
+            if (isOwner) GameUI_default.refreshRequests();
         }
     }
 
@@ -11156,44 +11010,9 @@ function createPrivateVisualTheme(menuCSS, hudCSS) {
         constructor(client2) {
             this.client = client2;
         }
+        // DISABLED: leaveClan + 4 spikes on teammate when insta on (teamkill).
         postTick() {
-            const {_ModuleHandler: ModuleHandler, InputHandler: InputHandler2, PlayerManager: PlayerManager2, myPlayer: myPlayer, PacketManager: PacketManager2} = this.client;
-            if (ModuleHandler.moduleActive) {
-                return;
-            }
-            if (!InputHandler2.instaToggle) {
-                InputHandler2.instaReset();
-                return;
-            }
-            const nearestTeammate = PlayerManager2.nearestTeammate;
-            if (!nearestTeammate) {
-                return;
-            }
-            const pos1 = myPlayer.pos.current;
-            const pos2 = nearestTeammate.pos.current;
-            const distance = pos1.distance(pos2);
-            const angle = pos1.angle(pos2);
-            if (distance > 500) {
-                return;
-            }
-            InputHandler2.instakillTarget = nearestTeammate;
-            if (distance > 175) {
-                return;
-            }
-            const angles = [ angle, angle - toRadians(90), angle + toRadians(90), angle + toRadians(180) ];
-            const id = myPlayer.getItemByType(4);
-            const current = myPlayer.getPlacePosition(pos1, id, angle);
-            const distance2 = current.distance(pos1);
-            ModuleHandler.placeAngles[0] = 4;
-            ModuleHandler.placeAngles[1] = angles;
-            if (distance > distance2 || !angles.every(angle2 => myPlayer.canPlaceObject(4, angle2))) {
-                return;
-            }
-            InputHandler2.instaReset();
-            PacketManager2.leaveClan();
-            for (const angle2 of angles) {
-                ModuleHandler.place(4, angle2);
-            }
+            return;
         }
     }
 
@@ -11667,7 +11486,12 @@ function createPrivateVisualTheme(menuCSS, hudCSS) {
             const signature = obstacles.map(o => `${o.item.id}:${o.center.x}:${o.center.y}:${o.radius}`).join('|');
             const now = Date.now();
             let plan = extra.routePlan;
-            const hold = () => { extra.routePoint = null; extra.stopRadius = 4; return origin; };
+            const hold = () => {
+                extra.routePoint = null;
+                extra.stopRadius = Math.min(4, stop);
+                if (target && origin.distance(target) > stop) return target;
+                return origin;
+            };
             const waypoint = path => {
                 for (let i = path.length - 1; i >= 0; i--) {
                     if (origin.distance(path[i]) > 0.1 && this.clear(origin, path[i], obstacles)) return i;
@@ -12100,6 +11924,8 @@ function createPrivateVisualTheme(menuCSS, hudCSS) {
 
     // Bots Extra menu command adapter
     const ExtraCommands = Object.create(null);
+    ExtraCommands.mode = 'stay';
+    ExtraCommands.modeStarted = Date.now();
     const BotFollowPlayers = {
         sources(owner, preferred = null) {
             return [...new Set([preferred, owner, ...owner.clients])].filter(source => source && !source.crossServer && source.SocketManager.socket?.readyState !== 3);
@@ -12272,7 +12098,7 @@ function createPrivateVisualTheme(menuCSS, hudCSS) {
             this.navigationTarget = null;
             this.navigationHolding = false;
         }
-        resetMovement() { this.resetRoute(); this.millsFinished = false; this.millCount = 0; this.millPending = []; this.randomPosition = null; this.randomUntil = 0; this.gatherObject = null; this.client._ModuleHandler?.staticModules?.movement?.resetFormation(); }
+        resetMovement() { this.resetRoute(); this._followSettled = false; this._followHoldSpot = null; this._followHoldOwner = null; this._followFace = null; this.millsFinished = false; this.millCount = 0; this.millPending = []; this.randomPosition = null; this.randomUntil = 0; this.gatherObject = null; this.client._ModuleHandler?.staticModules?.movement?.resetFormation(); }
         reset() {
             this.animalTrap.reset();
             if (this.client._ModuleHandler) { this.client._ModuleHandler.pendingSync = null; this.client._ModuleHandler.syncExecuting = false; this.client._ModuleHandler.autoShootExecuting = false; }
@@ -12311,55 +12137,87 @@ function createPrivateVisualTheme(menuCSS, hudCSS) {
             if (!(item instanceof PlayerObject) || item.health <= 0 || ![13, 14].includes(item.type)) return false;
             return Items[item.type].type === type;
         }
+        ownerFaceAngle() {
+            const owner = this.client.ownerClient;
+            if (!owner) return 0;
+            const ih = owner.InputHandler;
+            // Prefer real look direction (cursor / mouse), not movement velocity
+            if (ih && Number.isFinite(ih.mouse?.angle)) return ih.mouse.angle;
+            const ang = owner._ModuleHandler?._currentAngle;
+            if (Number.isFinite(ang)) return ang;
+            const mp = owner.myPlayer?.pos?.current;
+            const cur = ih?.cursorPosition?.(true);
+            if (mp && cur && Number.isFinite(cur.x)) {
+                return Math.atan2(cur.y - mp.y, cur.x - mp.x);
+            }
+            return 0;
+        }
         followWedge(center) {
             const owner = this.client.ownerClient;
             const me = this.client.myPlayer;
             const ownerPlayer = owner?.myPlayer;
             if (!center || !ownerPlayer?.pos?.current) return center;
-            const ownerPos = ownerPlayer.pos.current;
-            // Keep a comfortable ring behind the player (user can raise radius in menu)
-            const base = Math.max(140, Math.min(360, safeNum(window.BOT_FOLLOW_RADIUS, 175)));
-            const nearR = base + 220;
-            const bots = [...owner.clients]
-                .filter(b => {
-                    if (!b || b.crossServer || !b.myPlayer?.inGame) return false;
-                    const p = b.myPlayer.pos?.current;
-                    if (!p || !Number.isFinite(p.x)) return false;
-                    return ownerPos.distance(p) <= nearR;
-                })
-                .sort((a, b) => (a.myPlayer.id || 0) - (b.myPlayer.id || 0));
-            let face = ownerPlayer.dir;
-            if (!Number.isFinite(face)) face = 0;
+            const face = this.ownerFaceAngle();
+            this._followFace = face;
             const behind = face + Math.PI;
+            const base = Math.max(150, Math.min(380, safeNum(window.BOT_FOLLOW_RADIUS, 180)));
             const ownerScale = safeNum(ownerPlayer.scale, 35);
             const botScale = safeNum(me.scale, 35);
-            // Hard clearance so bots never sit inside the owner's collision
-            const clear = ownerScale + botScale + 36;
-            const gatherDist = Math.max(clear + 20, base * 0.85);
-            if (!bots.includes(this.client)) {
-                this.stopRadius = Math.max(18, botScale * 0.45);
-                return new Vector_default(
-                    center.x + Math.cos(behind) * gatherDist,
-                    center.y + Math.sin(behind) * gatherDist
-                );
-            }
+            // Stay outside owner body so they never push him from inside
+            const clear = ownerScale + botScale + 48;
+            this._followClear = clear;
+            const bots = [...owner.clients]
+                .filter(b => b && !b.crossServer && b.myPlayer?.inGame && Number.isFinite(b.myPlayer.pos?.current?.x))
+                .sort((a, b) => (a.myPlayer.id || 0) - (b.myPlayer.id || 0));
             const index = Math.max(0, bots.indexOf(this.client));
-            let row = 0, capacity = 1, left = index;
-            while (left >= capacity) {
-                left -= capacity;
-                row++;
-                capacity = Math.min(row + 1, 4);
+            // Fan in an arc BEHIND the player (not a full ring)
+            const n = Math.max(1, bots.length);
+            const spread = Math.min(1.35, 0.28 + n * 0.09); // radians total fan
+            const t = n <= 1 ? 0 : (index / (n - 1)) * 2 - 1; // -1 .. +1
+            const slotAngle = behind + t * (spread / 2);
+            // Deeper rows for many bots
+            const row = Math.floor(index / 5);
+            const dist = Math.max(clear + 30, base) + row * (botScale * 1.8 + 32);
+            this.stopRadius = Math.max(20, botScale * 0.5);
+            return new Vector_default(
+                center.x + Math.cos(slotAngle) * dist,
+                center.y + Math.sin(slotAngle) * dist
+            );
+        }
+        // Always approach the behind-slot by walking on a circle around the owner
+        followOrbitWaypoint(from, to, ownerPos, minR) {
+            if (!from || !to || !ownerPos) return to;
+            const rMin = Math.max(55, minR || 80);
+            const aFrom = Math.atan2(from.y - ownerPos.y, from.x - ownerPos.x);
+            const aTo = Math.atan2(to.y - ownerPos.y, to.x - ownerPos.x);
+            let d = aTo - aFrom;
+            while (d > Math.PI) d -= Math.PI * 2;
+            while (d < -Math.PI) d += Math.PI * 2;
+            const distFrom = from.distance(ownerPos);
+            const distTo = to.distance(ownerPos);
+            // Already near the target slot and outside body
+            if (from.distance(to) < 50 && distFrom >= rMin * 0.9) return to;
+            // If angular gap is large OR we are inside/near owner — force arc step
+            const needOrbit = Math.abs(d) > 0.35 || distFrom < rMin + 15;
+            if (!needOrbit) {
+                // Straight line must not clip the owner circle
+                const dx = to.x - from.x, dy = to.y - from.y;
+                const len2 = dx * dx + dy * dy;
+                if (len2 > 1) {
+                    let t = ((ownerPos.x - from.x) * dx + (ownerPos.y - from.y) * dy) / len2;
+                    t = Math.max(0, Math.min(1, t));
+                    const px = from.x + dx * t, py = from.y + dy * t;
+                    if (Math.hypot(px - ownerPos.x, py - ownerPos.y) >= rMin) return to;
+                } else return to;
             }
-            const col = left;
-            // Row depth + lateral gap large enough that bots do not shove each other
-            const rowGap = botScale * 1.75 + 28;
-            const sideGap = botScale * 2.15 + 30;
-            const dist = Math.max(clear + 24, base * 0.75) + row * rowGap;
-            const side = capacity <= 1 ? 0 : (col - (capacity - 1) / 2) * sideGap;
-            const dx = Math.cos(behind) * dist + Math.cos(behind + Math.PI / 2) * side;
-            const dy = Math.sin(behind) * dist + Math.sin(behind + Math.PI / 2) * side;
-            this.stopRadius = Math.max(16, botScale * 0.4);
-            return new Vector_default(center.x + dx, center.y + dy);
+            // Step along shorter arc, radius clamped outside collision
+            const step = Math.sign(d || 1) * Math.min(Math.abs(d), 0.55);
+            const a = aFrom + step;
+            const r = Math.max(rMin + 12, Math.min(Math.max(distFrom, rMin + 12), distTo + 40));
+            return new Vector_default(
+                ownerPos.x + Math.cos(a) * r,
+                ownerPos.y + Math.sin(a) * r
+            );
         }
         formation(center, mode) {
             const owner = this.client.ownerClient;
@@ -12542,10 +12400,40 @@ function createPrivateVisualTheme(menuCSS, hudCSS) {
             this.gatherObject = null;
             if (mode === 'stay') return this.navigate(null, 20);
             if (mode === 'follow') {
-                const spot = this.followWedge(target);
-                return this.navigate(spot, this.stopRadius);
-            }
-            else if (mode === 'cursorFollow') {
+                const me = this.client.myPlayer;
+                const pos = me.pos?.current;
+                const ownerPos = this.client.ownerClient?.myPlayer?.pos?.current;
+                if (!pos || !ownerPos) return this.navigate(null, 20);
+                const face = this.ownerFaceAngle();
+                const spot = this.followWedge(ownerPos);
+                if (!spot) return this.navigate(null, 20);
+                const botScale = safeNum(me.scale, 35);
+                const clearR = Math.max(75, this._followClear || (botScale + 80));
+                const dead = Math.max(36, botScale * 1.05);
+                this.stopRadius = dead;
+
+                const dist = pos.distance(spot);
+                // Angular error vs "behind" — only park when we are actually in the back fan
+                const ang = Math.atan2(pos.y - ownerPos.y, pos.x - ownerPos.x);
+                const behind = face + Math.PI;
+                let ad = ang - behind;
+                while (ad > Math.PI) ad -= Math.PI * 2;
+                while (ad < -Math.PI) ad += Math.PI * 2;
+                const behindOk = Math.abs(ad) < 0.85;
+                if (dist <= dead && behindOk) {
+                    this.resetRoute?.();
+                    return null; // stand still behind player
+                }
+
+                // Always prefer orbit so we never cut through the player
+                const goal = this.followOrbitWaypoint(pos, spot, ownerPos, clearR);
+                try {
+                    const obstacles = ExtraPathfinder.obstacles(this, pos, goal);
+                    const blocked = obstacles.some(item => ExtraPathfinder.intersects(pos, goal, item));
+                    if (!blocked) return this.directDestination(goal, Math.max(12, dead * 0.4));
+                } catch (_) {}
+                return this.navigate(goal, Math.max(12, dead * 0.4));
+            } else if (mode === 'cursorFollow') {
                 target = this.client.ownerClient.InputHandler.cursorPosition(true);
                 return this.directDestination(target, this.cursorStop(target));
             } else if (mode === 'playerFollow') {
@@ -12784,6 +12672,7 @@ function createPrivateVisualTheme(menuCSS, hudCSS) {
             const batch = {cancelled:false, continuous:true, added:0, failed:0, started:0, nextIndex:0,
                 mainSocket:client.SocketManager.socket, servers:target ? [target] : [], waiters:new Set, error:null};
             const attempts = new Set;
+            const allAttempts = [];
             this.spawning = batch;
             this.updateButtons();
             try {
@@ -12793,22 +12682,26 @@ function createPrivateVisualTheme(menuCSS, hudCSS) {
                 const authorize = async () => {
                     while (!batch.cancelled) {
                         // Keep a continuous run bounded while verified sockets finish connecting.
-                        while (!batch.cancelled && attempts.size >= 4) await Promise.race(attempts);
+                        while (!batch.cancelled && attempts.size >= Infinity /* server pool */) await Promise.race(attempts);
                         if (batch.cancelled) break;
                         batch.nextIndex++;
                         let started;
                         const ready = new Promise(resolve => { started = resolve; });
                         const done = this.add(target, batch, started).then(result => {
-                            if (result.ok) batch.added++;
-                            else if (!batch.cancelled) {
+                            if (result.ok) {
+                                batch.added++;
+                            } else if (!batch.cancelled) {
                                 batch.failed++;
-                                this.stopSpawning(result.error || 'The bot connection could not be completed.');
                             }
+
                             this.spawningProgress(batch);
                             return result;
                         });
+
                         attempts.add(done);
-                        done.then(() => attempts.delete(done));
+                        allAttempts.push(done);
+
+                        done.finally(() => attempts.delete(done));
                         this.spawningProgress(batch);
                         const result = await ready;
                         if (result.ok) batch.started++;
@@ -12823,7 +12716,7 @@ function createPrivateVisualTheme(menuCSS, hudCSS) {
                     }
                 };
                 await Promise.all(Array.from({length:batch.verification.concurrency}, authorize));
-                await Promise.all(attempts);
+                await Promise.allSettled(allAttempts);
             } catch (error) {
                 this.stopSpawning(error.message || 'Could not start spawning.');
                 await Promise.allSettled(attempts);
@@ -13004,7 +12897,7 @@ function createPrivateVisualTheme(menuCSS, hudCSS) {
             this.show(this.pending ? 'Bots removed; cancelling pending connection...' : 'All bots removed.');
         }
     };
-
+    
     const CrossServerBots = {
         servers: [],
         loading: null,
@@ -15076,6 +14969,118 @@ function createPrivateVisualTheme(menuCSS, hudCSS) {
                 span.textContent = kills.toString();
             }
         }
+        botKills=0;
+        botKillSocket=null;
+        botKillsView=null;
+        botKillIdentities=new Map;
+        botKillUpdates=new WeakMap;
+        isBotKillConnection(bot, allowOwner = false) {
+            const main = client.SocketManager.socket, socket = bot.SocketManager.socket;
+            if ((!allowOwner && bot.isOwner) || bot.ownerClient !== client || bot.crossServer ||
+                main?.readyState !== 1 || socket?.readyState !== 1 || this.botKillSocket !== main) return false;
+            try {
+                const ownerURL = new URL(main.url), botURL = new URL(socket.url);
+                return ownerURL.origin === botURL.origin && ownerURL.pathname === botURL.pathname;
+            } catch (_) { return false; }
+        }
+        rememberBotKillIdentity(bot) {
+            if (!this.isBotKillConnection(bot) || bot.myPlayer.id === -1 || bot.clientID == null) return;
+            // Membership is independent of clan changes and removal from the bot controls.
+            this.botKillIdentities.set(bot.myPlayer.id, bot.clientID);
+        }
+        observeBotKillIdentity(viewer, id, socketID) {
+            if (!this.isBotKillConnection(viewer, true)) return;
+            if (this.botKillIdentities.has(id) && this.botKillIdentities.get(id) !== socketID) {
+                // A different connection reusing a numeric player ID is not our old bot.
+                this.botKillIdentities.delete(id);
+            }
+        }
+        botKillState(bot) {
+            let state = this.botKillUpdates.get(bot);
+            if (!state || state.socket !== bot.SocketManager.socket) {
+                state = {socket:bot.SocketManager.socket, kills:bot.myPlayer.resources.kills, receipts:[]};
+                this.botKillUpdates.set(bot, state);
+            }
+            return state;
+        }
+        beginBotKillUpdate(bot, total) {
+            if (!this.isBotKillConnection(bot) || !Number.isSafeInteger(total) || total < 0) return null;
+            const state = this.botKillState(bot), amount = total - state.kills;
+            state.kills = total;
+            if (amount < 0) state.receipts.length = 0;
+            if (!Number.isSafeInteger(amount) || amount <= 0) return null;
+            const receipt = {socket:state.socket, main:this.botKillSocket, remaining:amount, excluded:0};
+            state.receipts.push(receipt);
+            return receipt;
+        }
+        observeBotKillHealth(bot, id, previousHealth, health) {
+            if (!this.isBotKillConnection(bot) || !Number.isFinite(health)) return;
+            const state = this.botKillUpdates.get(bot);
+            if (!state || state.socket !== bot.SocketManager.socket) return;
+            // The kill total is sent before the victim's health update on this socket.
+            // Match only that following update in the same snapshot batch. Never use
+            // another bot's death, a nearby player, a name or an earlier death as proof.
+            const receipt = state.receipts.findLast(entry => entry.remaining > 0);
+            if (!receipt || health <= 0 && previousHealth <= 0) return;
+            receipt.remaining--;
+            if (health <= 0 && previousHealth > 0 && this.botKillIdentities.has(id)) receipt.excluded++;
+        }
+        resetBotKillLife(bot) {
+            if (!this.isBotKillConnection(bot)) return;
+            const state = this.botKillState(bot);
+            state.kills = 0;
+            state.receipts.length = 0;
+        }
+        finishBotKillFrame(bot) {
+            const state = this.botKillUpdates.get(bot);
+            if (state) state.receipts.length = 0;
+        }
+        addBotKills(bot, amount, receipt = null) {
+            if (!this.isBotKillConnection(bot) || !Number.isSafeInteger(amount) || amount <= 0) return;
+            if (receipt?.socket === bot.SocketManager.socket && receipt.main === this.botKillSocket) {
+                amount -= Math.min(amount, receipt.excluded);
+            }
+            // Keep confirmed kills even after a bot dies or leaves the server.
+            this.botKills += amount;
+            this.refreshBotKills();
+        }
+        refreshBotKills() {
+            const anchor = document.getElementById('killCounter');
+            if (!anchor?.parentElement) return;
+            let view = this.botKillsView;
+            if (!view?.root.isConnected || view.anchor !== anchor) {
+                view?.observer?.disconnect();
+                view?.root.remove();
+                const root = document.createElement('div');
+                root.id = 'coleanBotKills'; root.className = 'resourceDisplay';
+                root.title = 'Bot kills in this server session';
+                root.setAttribute('role', 'status');
+                root.style.cssText = 'position:absolute;right:0;left:auto;bottom:auto;margin:0;display:flex;align-items:center;gap:8px;white-space:nowrap;padding:5px 10px;background-image:none;pointer-events:none';
+                const count = document.createElement('span'); count.id = 'coleanBotKillCount';
+                const label = document.createElement('span'); label.textContent = 'BOT';
+                label.style.cssText = 'font-size:14px;line-height:1'; label.setAttribute('aria-hidden', 'true');
+                root.append(count, label); anchor.after(root);
+                view = this.botKillsView = {root, count, anchor, observer:null};
+                if (typeof ResizeObserver === 'function') {
+                    view.observer = new ResizeObserver(() => this.positionBotKills());
+                    view.observer.observe(anchor);
+                    view.observer.observe(anchor.parentElement);
+                }
+                if (!this.botKillsResizeBound) {
+                    this.botKillsResizeBound = true;
+                    window.addEventListener('resize', () => this.positionBotKills());
+                }
+            }
+            view.count.textContent = String(this.botKills);
+            view.root.setAttribute('aria-label', `Bot kills: ${this.botKills}`);
+            this.positionBotKills();
+        }
+        positionBotKills() {
+            const view = this.botKillsView;
+            if (!view?.root.isConnected || !view.anchor.isConnected) return;
+            view.root.style.top = view.anchor.offsetTop + view.anchor.offsetHeight + 5 + 'px';
+            view.root.style.right = Math.max(0, view.anchor.parentElement.clientWidth - view.anchor.offsetLeft - view.anchor.offsetWidth) + 'px';
+        }
         updateTotalDeaths(deaths) {
             const span = document.querySelector("#coleanTotalDeaths");
             if (span !== null) {
@@ -15193,6 +15198,153 @@ function createPrivateVisualTheme(menuCSS, hudCSS) {
             noticationDisplay.innerHTML = "";
             noticationDisplay.style.display = "none";
         }
+        requestsView=null;
+        requestNotificationID=null;
+        hasActiveRequestBots() {
+            const main = client.SocketManager.socket;
+            if (!client.SocketManager.active || main?.readyState !== 1) return false;
+            const server = url => { try { const parsed = new URL(url); return parsed.origin + parsed.pathname; } catch (_) { return null; } };
+            const currentServer = server(main.url);
+            return currentServer !== null && [...client.clients].some(bot => bot.ownerClient === client &&
+                !bot.crossServer && !bot.disconnectRequested && bot.myPlayer.inGame &&
+                bot.SocketManager.active && bot.SocketManager.socket?.readyState === 1 &&
+                server(bot.SocketManager.socket.url) === currentServer);
+        }
+        ensureRequestsView() {
+            if (this.requestsView?.root.isConnected) return this.requestsView;
+            const {allianceButton: anchor, gameUI: gameUI} = this.getElements();
+            if (!anchor) return null;
+            if (!document.getElementById('coleanRequestsStyle')) {
+                const style = document.createElement('style');
+                style.id = 'coleanRequestsStyle';
+                style.textContent = `
+                    #coleanRequests{position:fixed;z-index:30;display:flex;flex-direction:column;align-items:flex-end;gap:5px;max-width:calc(100vw - 16px);color:#fff;font:14px "Hammersmith One",sans-serif;pointer-events:auto;text-align:left}
+                    #coleanRequests[hidden],#coleanRequests [hidden]{display:none!important}
+                    #coleanRequests button{font:inherit;color:#fff;border:0;border-radius:4px;cursor:pointer;line-height:1.3}
+                    #coleanRequestsButton{background:rgba(0,0,0,.35);padding:5px 8px;font-weight:bold!important;white-space:nowrap}
+                    #coleanRequests button:hover{filter:brightness(1.2)}
+                    #coleanRequests button:focus-visible{outline:2px solid #ddd;outline-offset:2px}
+                    #coleanRequestsPanel{position:absolute;top:calc(100% + 5px);box-sizing:border-box;width:320px;max-width:calc(100vw - 16px);padding:10px;background:rgba(25,25,30,.96);border-radius:5px;box-shadow:0 4px 14px #0005}
+                    #coleanRequests .requests-heading{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;font-size:16px;font-weight:bold}
+                    #coleanRequests .requests-close{background:transparent;font-size:20px;padding:0 5px}
+                    #coleanRequestsList{max-height:min(280px,calc(100vh - 160px));overflow-y:auto;overscroll-behavior:contain}
+                    #coleanRequests .requests-row{display:flex;align-items:center;gap:6px;padding:8px 0;border-top:1px solid #ffffff18}
+                    #coleanRequests .requests-name{flex:1;min-width:0;overflow-wrap:anywhere}
+                    #coleanRequests .requests-name small{display:block;font-size:11px;color:#aaa;margin-top:2px}
+                    #coleanRequests .requests-accept{background:#507b39;padding:5px 7px}
+                    #coleanRequests .requests-reject{background:#8b4444;padding:5px 7px}
+                    #coleanRequests .requests-empty{margin:9px 0;color:#ccc}
+                    #coleanRequestsStatus{margin:8px 0 0;color:#f2bd87;font-size:12px}
+                `;
+                document.head.appendChild(style);
+            }
+            const root = document.createElement('div');
+            root.id = 'coleanRequests'; root.hidden = true;
+            const button = document.createElement('button');
+            button.id = 'coleanRequestsButton'; button.type = 'button'; button.textContent = 'Requests (0)';
+            button.setAttribute('aria-expanded', 'false'); button.setAttribute('aria-controls', 'coleanRequestsPanel');
+            const panel = document.createElement('section');
+            panel.id = 'coleanRequestsPanel'; panel.hidden = true; panel.setAttribute('aria-label', 'Clan requests');
+            const heading = document.createElement('div'); heading.className = 'requests-heading';
+            const title = document.createElement('span'); title.textContent = 'Requests';
+            const close = document.createElement('button'); close.type = 'button'; close.className = 'requests-close';
+            close.textContent = '×'; close.setAttribute('aria-label', 'Close requests');
+            const list = document.createElement('div'); list.id = 'coleanRequestsList';
+            const status = document.createElement('p'); status.id = 'coleanRequestsStatus';
+            status.hidden = true; status.setAttribute('role', 'status');
+            heading.append(title, close); panel.append(heading, list, status); root.append(button, panel);
+            (gameUI || document.body).appendChild(root);
+            this.requestsView = {root, button, panel, list, status, signature:null};
+            button.onclick = () => {
+                const opening = panel.hidden;
+                if (opening) this.closePopups(null);
+                panel.hidden = !opening;
+                button.setAttribute('aria-expanded', String(opening));
+                this.positionRequests();
+            };
+            close.onclick = () => { this.closeRequests(); button.focus(); };
+            root.addEventListener('keydown', event => {
+                event.stopPropagation();
+                if (event.key === 'Escape') { event.preventDefault(); this.closeRequests(); button.focus(); }
+            });
+            if (!this.requestsResizeBound) {
+                this.requestsResizeBound = true;
+                window.addEventListener('resize', () => this.positionRequests());
+            }
+            return this.requestsView;
+        }
+        closeRequests() {
+            const view = this.requestsView;
+            if (!view) return;
+            view.panel.hidden = true;
+            view.button.setAttribute('aria-expanded', 'false');
+            this.positionRequests();
+        }
+        positionRequests() {
+            const view = this.requestsView, anchor = this.getElements().allianceButton;
+            if (!view || view.root.hidden || !anchor) return;
+            const bounds = anchor.getBoundingClientRect();
+            const left = Math.max(8, Math.min(bounds.right - view.root.offsetWidth, innerWidth - view.root.offsetWidth - 8));
+            view.root.style.left = left + 'px';
+            view.root.style.top = Math.max(8, bounds.bottom + 5) + 'px';
+            if (!view.panel.hidden) {
+                const panelLeft = Math.max(8, Math.min(left + view.root.offsetWidth - view.panel.offsetWidth, innerWidth - view.panel.offsetWidth - 8));
+                view.panel.style.left = panelLeft - left + 'px';
+            }
+        }
+        refreshRequests() {
+            const player = client.myPlayer;
+            const connected = client.SocketManager.active && client.SocketManager.socket?.readyState === 1;
+            const requests = player.joinRequests.filter(([id]) => !client.clientIDList.has(id));
+            const showPanel = connected && player.inGame && player.isLeader && (this.hasActiveRequestBots() || requests.length > 0);
+            const view = showPanel ? this.ensureRequestsView() : this.requestsView;
+            if (showPanel && view) {
+                this.clearNotication();
+                view.root.hidden = false;
+                view.button.textContent = `Requests (${requests.length})`;
+                const signature = JSON.stringify(requests);
+                if (signature !== view.signature) {
+                    view.signature = signature;
+                    view.status.hidden = true;
+                    view.list.replaceChildren();
+                    if (!requests.length) {
+                        const empty = document.createElement('p'); empty.className = 'requests-empty';
+                        empty.textContent = 'No pending requests'; view.list.appendChild(empty);
+                    }
+                    for (const [id, nickname] of requests) {
+                        const row = document.createElement('div'); row.className = 'requests-row'; row.dataset.requestId = String(id);
+                        const name = document.createElement('span'); name.className = 'requests-name'; name.textContent = nickname;
+                        const label = document.createElement('small'); label.textContent = `#${id}`; name.appendChild(label);
+                        row.appendChild(name);
+                        for (const accept of [true, false]) {
+                            const action = document.createElement('button'); action.type = 'button';
+                            action.textContent = accept ? 'Accept' : 'Reject';
+                            action.className = accept ? 'requests-accept' : 'requests-reject';
+                            action.setAttribute('aria-label', `${accept ? 'Accept' : 'Reject'} ${nickname}`);
+                            action.onclick = () => {
+                                if (!client._ModuleHandler.staticModules.autoAccept.respond(id, accept)) {
+                                    view.status.textContent = 'Could not send the response. Please try again.';
+                                    view.status.hidden = false;
+                                }
+                            };
+                            row.appendChild(action);
+                        }
+                        view.list.appendChild(row);
+                    }
+                }
+                this.positionRequests();
+            } else {
+                if (view) {
+                    view.root.hidden = true; this.closeRequests();
+                    if (view.signature !== null) {
+                        view.signature = null; view.list.replaceChildren(); view.status.hidden = true;
+                    }
+                }
+                if (connected && player.inGame && player.isLeader && requests.length && !Settings_default._autoaccept) {
+                    this.createRequest(requests[0]);
+                } else this.clearNotication();
+            }
+        }
         clearNotication() {
             const {noticationDisplay: noticationDisplay} = this.getElements();
             this.resetNotication(noticationDisplay);
@@ -15213,9 +15365,14 @@ function createPrivateVisualTheme(menuCSS, hudCSS) {
                 const button = this.createAcceptButton(type);
                 button.onclick = () => {
                     this.resetNotication(noticationDisplay);
-                    client.PacketManager.clanRequest(id, !!type);
-                    client.myPlayer.joinRequests.shift();
-                    client.pendingJoins.delete(id);
+                    const ok = client._ModuleHandler.staticModules.autoAccept.respond(id, !!type);
+                    if (!ok) {
+                        client.PacketManager.clanRequest(id, !!type);
+                        const idx = client.myPlayer.joinRequests.findIndex(r => r[0] === id);
+                        if (idx !== -1) client.myPlayer.joinRequests.splice(idx, 1);
+                        client.pendingJoins.delete(id);
+                    }
+                    GameUI_default.refreshRequests();
                 };
                 noticationDisplay.appendChild(button);
             };
@@ -16488,7 +16645,7 @@ function createPrivateVisualTheme(menuCSS, hudCSS) {
         <input id="autoshoot-range" type="range" min="100" max="1400" step="50" value="1400" style="flex:1;min-width:0;accent-color:#6eb6ff;" title="Maximum firing distance, limited by the equipped weapon's range.">
     </div>
     <div class="gmx-row">
-        <button id="btn-autoplacer" class="gmx-btn" style="flex:1;" aria-pressed="false" title="Enable Colean Auto Placer for local bots independently of the player.">Auto Placer</button>
+        <button id="btn-autoplacer" class="gmx-btn" style="flex:1;" aria-pressed="false" title="Enable Colean Auto Placer for local bots independently of the player.">Auto Placer</button><button id="btn-botchat" class="gmx-btn" style="flex:1;" title="Bots repeat your chat when ON.">Bot Chat OFF</button>
     </div>
     <div class="gmx-row">
         <button id="btn-syncshot" class="gmx-btn" style="flex:1;" title="Uses Colean left-click auto aim for you and your bots, including while Manual Aim is enabled.">Sync Hit</button>
@@ -16783,6 +16940,13 @@ function createPrivateVisualTheme(menuCSS, hudCSS) {
             const botPlacer = p.querySelector('#btn-autoplacer');
             toggleBtnActive(botPlacer, Settings_default._botAutoPlacer);
             botPlacer?.setAttribute('aria-pressed', String(Settings_default._botAutoPlacer));
+            const botChat = p.querySelector('#btn-botchat');
+            if (botChat) {
+                toggleBtnActive(botChat, !!Settings_default._botChatEcho);
+                botChat.textContent = 'Bot Chat ' + (Settings_default._botChatEcho ? 'ON' : 'OFF');
+                botChat.setAttribute('aria-pressed', String(!!Settings_default._botChatEcho));
+            }
+
             const autoShoot = p.querySelector('#btn-autoshoot');
             toggleBtnActive(autoShoot, Settings_default._botAutoShoot);
             autoShoot?.setAttribute('aria-pressed', String(Settings_default._botAutoShoot));
@@ -16873,6 +17037,15 @@ function createPrivateVisualTheme(menuCSS, hudCSS) {
             animate(p.querySelector('#btn-autoplacer')); refreshToggles(p);
             panelFeedback(p, 'Bot Auto Placer ' + (Settings_default._botAutoPlacer ? 'ON' : 'OFF'));
         };
+        const botChatBtn = p.querySelector('#btn-botchat');
+        if (botChatBtn) botChatBtn.onclick = () => {
+            Settings_default._botChatEcho = !Settings_default._botChatEcho;
+            SaveSettings();
+            botChatBtn.textContent = 'Bot Chat ' + (Settings_default._botChatEcho ? 'ON' : 'OFF');
+            animate(botChatBtn); refreshToggles(p);
+            panelFeedback(p, 'Bot Chat Echo ' + (Settings_default._botChatEcho ? 'ON' : 'OFF'));
+        };
+
         p.querySelector('#btn-botsync').onclick = () => {
             Settings_default._botSync = !Settings_default._botSync;
             SaveSettings();
