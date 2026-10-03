@@ -10123,6 +10123,19 @@ function createPrivateVisualTheme(menuCSS, hudCSS) {
                     return 6;
                 }
             }
+            // Grinding resources: keep Samurai Armor (20) even while walking to the node.
+            // Biome hats only when not actively farming.
+            try {
+                const extra = ModuleHandler.staticModules?.aibmExtra;
+                const node = extra?.gatherObject;
+                const grinding = node?.pos?.current && (
+                    (typeof extra.effectiveMode === 'function' && extra.effectiveMode() === 'grinder') ||
+                    current.distance(node.pos.current) < 450
+                );
+                if (grinding && ModuleHandler.canBuy(0, 20)) {
+                    return 20; // Samurai Armor
+                }
+            } catch (_) {}
             if (Settings_default._biomehats && useFlipper && !myPlayer.onPlatform) {
                 const inRiver = pointInRiver(current) || pointInRiver(future);
                 if (inRiver) {
@@ -12132,6 +12145,178 @@ function createPrivateVisualTheme(menuCSS, hudCSS) {
             }
             return result;
         }
+        gatherTypeKey(type) {
+            return ({0: 'wood', 1: 'food', 2: 'stone', 3: 'gold'})[type] || 'wood';
+        }
+        gatherResKey(item) {
+            if (!item) return null;
+            if (item.id != null) return item.id;
+            const p = item.pos?.current;
+            return p ? (Math.round(p.x) + ':' + Math.round(p.y)) : null;
+        }
+        isGatherBlacklisted(item) {
+            if (!this._gatherBlacklist) this._gatherBlacklist = new Map();
+            const key = this.gatherResKey(item);
+            if (key == null) return false;
+            const until = this._gatherBlacklist.get(key);
+            if (until == null) return false;
+            if (performance.now() >= until) {
+                this._gatherBlacklist.delete(key);
+                return false;
+            }
+            return true;
+        }
+        blacklistGather(item, ms = 8000) {
+            if (!this._gatherBlacklist) this._gatherBlacklist = new Map();
+            const key = this.gatherResKey(item);
+            if (key == null) return;
+            this._gatherBlacklist.set(key, performance.now() + ms);
+            this._gatherProg = null;
+        }
+        // True if bot has been stuck near a node without gaining that resource type
+        isGatherStuck(res, type) {
+            const me = this.client.myPlayer;
+            if (!me?.pos?.current || !res?.pos?.current) return false;
+            const key = this.gatherTypeKey(type);
+            const amt = me.resources?.[key] || 0;
+            const resKey = this.gatherResKey(res);
+            const now = performance.now();
+            if (!this._gatherProg || this._gatherProg.resKey !== resKey || this._gatherProg.type !== type) {
+                this._gatherProg = {resKey, type, amt, since: now, nearSince: null};
+                return false;
+            }
+            if (amt > this._gatherProg.amt) {
+                this._gatherProg.amt = amt;
+                this._gatherProg.since = now;
+                this._gatherProg.nearSince = null;
+                return false;
+            }
+            const dist = me.pos.current.distance(res.pos.current);
+            const hit = safeNum(res.hitScale ?? res.collisionScale, 40);
+            const weapon = DataHandler_default.getWeapon(me.getItemByType(0));
+            const range = (weapon?.range || 65) + hit + 25;
+            // "Trying to farm" — close enough that hits should land if not blocked
+            if (dist <= range + 40) {
+                if (this._gatherProg.nearSince == null) this._gatherProg.nearSince = now;
+                // ~2s near without gain → crowded / not hitting
+                if (now - this._gatherProg.nearSince >= 2000) return true;
+            } else {
+                this._gatherProg.nearSince = null;
+                // Walking for a long time to same node is fine; don't blacklist yet
+            }
+            return false;
+        }
+        // Dynamic max bots/resource + per-bot blacklist if not gaining
+        claimGatherResource(type, maxPerResource = null) {
+            const me = this.client.myPlayer;
+            const owner = this.client.ownerClient;
+            if (!me?.pos?.current || !owner) return this.nearest(item => this.isGatherResource(item, type));
+
+            const bots = [...owner.clients]
+                .filter(b => b && !b.crossServer && b.myPlayer?.inGame && Number.isFinite(b.myPlayer.pos?.current?.x))
+                .sort((a, b) => (a.myPlayer.id || 0) - (b.myPlayer.id || 0) || String(a.clientID||'').localeCompare(String(b.clientID||'')));
+
+            const pool = [];
+            const seen = new Set();
+            const pushRes = (item) => {
+                if (!item?.pos?.current || !this.isGatherResource(item, type)) return;
+                const key = this.gatherResKey(item);
+                if (key == null || seen.has(key)) return;
+                seen.add(key);
+                pool.push(item);
+            };
+            try {
+                for (const item of owner.ObjectManager.objects.values()) pushRes(item);
+            } catch (_) {}
+            for (const item of this.objects()) pushRes(item);
+
+            const origin = owner.myPlayer?.pos?.current || me.pos.current;
+            pool.sort((a, b) => {
+                const da = origin.distance(a.pos.current);
+                const db = origin.distance(b.pos.current);
+                if (da !== db) return da - db;
+                return (a.id || 0) - (b.id || 0);
+            });
+
+            if (!pool.length) return null;
+
+            // Dynamic capacity: split bots across nodes, capped by physical ring size
+            const botCount = bots.length;
+            const resCount = pool.length;
+            let avgHit = 0;
+            for (const r of pool) avgHit += safeNum(r.hitScale ?? r.collisionScale, 40);
+            avgHit /= resCount;
+            const standR = avgHit + safeNum(me.scale, 35) + 12;
+            const ringCap = Math.max(2, Math.min(5, Math.floor((2 * Math.PI * standR) / 72)));
+            let maxPer = Math.ceil(botCount / resCount);
+            maxPer = Math.max(1, Math.min(ringCap, maxPer));
+            if (Number.isFinite(maxPerResource) && maxPerResource > 0) {
+                maxPer = Math.max(1, Math.min(maxPer, maxPerResource | 0));
+            }
+
+            const assignment = new Map();
+            let botIdx = 0;
+            for (const res of pool) {
+                for (let k = 0; k < maxPer && botIdx < bots.length; k++, botIdx++) {
+                    assignment.set(bots[botIdx], res);
+                }
+                if (botIdx >= bots.length) break;
+            }
+            while (botIdx < bots.length) {
+                assignment.set(bots[botIdx], pool[botIdx % pool.length]);
+                botIdx++;
+            }
+
+            let claimed = assignment.get(this.client) || pool[0];
+
+            // Prefer visible node if assignment is outside FOV
+            const localIds = new Set();
+            for (const item of this.objects()) {
+                if (item && item.id != null) localIds.add(item.id);
+            }
+            if (claimed.id != null && !localIds.has(claimed.id)) {
+                const visible = this.nearest(item => this.isGatherResource(item, type) && !this.isGatherBlacklisted(item));
+                if (visible) claimed = visible;
+            }
+
+            // Stuck near node without gains → blacklist and pick another
+            if (claimed && this.isGatherStuck(claimed, type)) {
+                this.blacklistGather(claimed, 9000);
+            }
+            if (claimed && this.isGatherBlacklisted(claimed)) {
+                const alt = pool.find(r => r !== claimed && this.gatherResKey(r) !== this.gatherResKey(claimed) && !this.isGatherBlacklisted(r))
+                    || pool.find(r => !this.isGatherBlacklisted(r));
+                if (alt) claimed = alt;
+            }
+
+            // Track progress for the chosen node
+            this.isGatherStuck(claimed, type); // init/update tracker
+
+            const claimKey = this.gatherResKey(claimed);
+            const peers = bots.filter(b => this.gatherResKey(assignment.get(b)) === claimKey);
+            // If we self-switched off assignment, still get a free slot index
+            let slot = peers.indexOf(this.client);
+            if (slot < 0) slot = Math.abs((me.id || 0) + (claimed.id || 0)) % Math.max(1, peers.length || 1);
+            this._gatherSlotIndex = slot;
+            this._gatherSlotCount = Math.max(1, peers.length || 1);
+            this._gatherMaxPer = maxPer;
+            return claimed;
+        }
+        gatherStandPoint(resource) {
+            if (!resource?.pos?.current) return null;
+            const me = this.client.myPlayer;
+            const center = resource.pos.current;
+            const botScale = safeNum(me.scale, 35);
+            const hit = safeNum(resource.collisionScale ?? resource.hitScale, 40);
+            const stand = botScale + hit + 12;
+            const n = Math.max(1, this._gatherSlotCount || 1);
+            const i = Math.max(0, this._gatherSlotIndex || 0);
+            const angle = (i / n) * Math.PI * 2 + (resource.id || 0) * 0.17;
+            return new Vector_default(
+                center.x + Math.cos(angle) * stand,
+                center.y + Math.sin(angle) * stand
+            );
+        }
         isGatherResource(item, type) {
             if (item instanceof Resource) return item.type === type && !item.isCactus;
             if (!(item instanceof PlayerObject) || item.health <= 0 || ![13, 14].includes(item.type)) return false;
@@ -12140,17 +12325,52 @@ function createPrivateVisualTheme(menuCSS, hudCSS) {
         ownerFaceAngle() {
             const owner = this.client.ownerClient;
             if (!owner) return 0;
+            const ownerPlayer = owner.myPlayer;
             const ih = owner.InputHandler;
-            // Prefer real look direction (cursor / mouse), not movement velocity
-            if (ih && Number.isFinite(ih.mouse?.angle)) return ih.mouse.angle;
-            const ang = owner._ModuleHandler?._currentAngle;
-            if (Number.isFinite(ang)) return ang;
-            const mp = owner.myPlayer?.pos?.current;
-            const cur = ih?.cursorPosition?.(true);
-            if (mp && cur && Number.isFinite(cur.x)) {
-                return Math.atan2(cur.y - mp.y, cur.x - mp.x);
+            const mh = owner._ModuleHandler;
+
+            // Look direction (head / cursor)
+            let look = null;
+            if (ih && Number.isFinite(ih.mouse?.angle)) look = ih.mouse.angle;
+            else if (Number.isFinite(mh?._currentAngle)) look = mh._currentAngle;
+            else {
+                const mp = ownerPlayer?.pos?.current;
+                const cur = ih?.cursorPosition?.(true);
+                if (mp && cur && Number.isFinite(cur.x)) look = Math.atan2(cur.y - mp.y, cur.x - mp.x);
             }
-            return 0;
+
+            // Movement direction (where the body is running)
+            let move = null;
+            let speed2 = 0;
+            const op = ownerPlayer?.pos;
+            if (op?.current && op?.old) {
+                const vx = op.current.x - op.old.x;
+                const vy = op.current.y - op.old.y;
+                speed2 = vx * vx + vy * vy;
+                if (speed2 > 2.25) move = Math.atan2(vy, vx);
+            }
+            if (move == null && Number.isFinite(ownerPlayer?.speed) && ownerPlayer.speed > 5 && Number.isFinite(mh?.move_dir)) {
+                move = mh.move_dir;
+                speed2 = Math.max(speed2, 10);
+            }
+            const isMoving = speed2 > 2.25 || (mh?.isMoving && (ownerPlayer?.speed || 0) > 4);
+
+            // Running → behind the path of movement; standing → behind where you look
+            let face = isMoving && move != null ? move : (look != null ? look : 0);
+            if (!Number.isFinite(face)) face = 0;
+
+            const prev = this._followFace;
+            if (Number.isFinite(prev)) {
+                let d = face - prev;
+                while (d > Math.PI) d -= Math.PI * 2;
+                while (d < -Math.PI) d += Math.PI * 2;
+                // Faster snap when switching run/stand so bots don't lag behind the wrong side
+                const k = isMoving ? 0.35 : 0.28;
+                face = prev + d * k;
+            }
+            this._followFace = face;
+            this._followUsingMove = !!isMoving;
+            return face;
         }
         followWedge(center) {
             const owner = this.client.ownerClient;
@@ -12469,12 +12689,15 @@ function createPrivateVisualTheme(menuCSS, hudCSS) {
                     this.stopRadius = safeNum(window.BOT_FOLLOW_RADIUS, 175);
                 } else {
                     const focus = needed[0];
-                    this.gatherObject = this.nearest(item => this.isGatherResource(item, resourceTypes[focus]));
+                    // Dynamic bots/resource + auto-switch if not gaining (crowd)
+                    this.gatherObject = this.claimGatherResource(resourceTypes[focus]);
                     if (!this.gatherObject) target = this.wander();
                     else {
-                        target = this.gatherObject.pos.current;
+                        const stand = this.gatherStandPoint(this.gatherObject);
+                        target = stand || this.gatherObject.pos.current;
                         const weapon = DataHandler_default.getWeapon(me.getItemByType(0));
-                        this.stopRadius = Math.max(me.scale + this.gatherObject.collisionScale + 5, (weapon?.range || 65) + this.gatherObject.hitScale - 20);
+                        // Stop near stand point; attack still uses range to the resource itself
+                        this.stopRadius = Math.max(18, safeNum(me.scale, 35) * 0.55);
                     }
                 }
             }
